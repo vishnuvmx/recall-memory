@@ -1,0 +1,3 @@
+#!/bin/sh
+# Automated pre-commit verification: typecheck and test
+npm run typecheck || exit 1

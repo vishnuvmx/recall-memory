@@ -1,0 +1,4 @@
+# Ephemeral local agent files (prevents PR merge conflicts across branches)
+PROJECT_MAP.md
+CURRENT_STATE.md
+sessions/

@@ -1,0 +1,265 @@
+#!/usr/bin/env node
+import { Command, InvalidArgumentError } from 'commander';
+import { runDoctor } from '../core/doctor.js';
+import { initProject } from '../core/init.js';
+import { rebuildIndex } from '../core/index-builder.js';
+import { approve, archive, checkpoint, context, log, map, propose, remember, status, undo } from '../core/service.js';
+import { requireInitialized } from '../core/project.js';
+import { serveStdio } from '../mcp/server.js';
+import { MEMORY_TYPES, type MemoryType } from '../schemas/index.js';
+import { RecallError } from '../utils/fs.js';
+
+const cwd = (): string => process.cwd();
+const collect = (v: string, prev: string[]): string[] => [...prev, v];
+const parseType = (v: string): MemoryType => {
+  if (!MEMORY_TYPES.includes(v as MemoryType)) throw new InvalidArgumentError(`Must be one of: ${MEMORY_TYPES.join(', ')}`);
+  return v as MemoryType;
+};
+const parseLimit = (v: string): number => {
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) throw new InvalidArgumentError('Must be a positive integer.');
+  return n;
+};
+const print = (s = ''): void => console.log(s);
+
+const program = new Command('recall')
+  .description('Local-first persistent project memory for AI coding agents. Markdown + Git; no network.')
+  .version('0.1.0');
+
+program
+  .command('init')
+  .description('Create .recall/ and install the managed agent-instruction block (idempotent, never overwrites)')
+  .option('--no-agent', 'do not touch the agent instruction file')
+  .action((o: { agent: boolean }) => {
+    const r = initProject(cwd(), { agent: o.agent });
+    print(`Project root: ${r.project.root} (${r.project.source === 'cwd' ? 'no Git repo or .recall found; using current directory' : `found via ${r.project.source}`})`);
+    for (const f of r.created) print(`  created  ${f}`);
+    for (const f of r.skipped) print(`  kept     ${f}`);
+    print(`Agent instructions: ${r.agent}`);
+    print('\nNothing was staged or committed. Review with `git status`, then commit when ready.');
+    print('Activate: your agent must read the instruction file (default AGENTS.md). If it does not, point it at');
+    print('.recall/MEMORY.md manually or use `recall serve` as an MCP server. See README.');
+  });
+
+program
+  .command('status')
+  .description('Show memory counts, index health, agent integration and Recall-only Git changes')
+  .action(() => {
+    const s = status(cwd());
+    print(`Project root: ${s.project.root}`);
+    print('Initialized: yes');
+    const fmt = (o: Record<string, number>): string => (Object.entries(o).map(([k, v]) => `${k}=${v}`).join(' ') || 'none');
+    print(`By type:   ${fmt(s.byType)}`);
+    print(`By status: ${fmt(s.byStatus)}`);
+    if (s.problems) print(`Malformed memory files: ${s.problems} (run \`recall doctor\`)`);
+    print(`Index: ${s.index}${s.index === 'up_to_date' ? '' : ' (run `recall rebuild`)'}`);
+    print(`Agent file ${s.agentFile}: ${s.agent}`);
+    if (!s.git.available) print('Git: not installed');
+    else if (!s.git.isRepo) print('Git: not a repository (no change tracking)');
+    else if (!s.git.changes || s.git.changes.length === 0) print('Recall changes (uncommitted): none');
+    else {
+      print('Recall changes (uncommitted, .recall/ only):');
+      for (const c of s.git.changes) print(`  ${c}`);
+    }
+  });
+
+program
+  .command('remember')
+  .description('Save explicit text as a memory note (default: proposed until approved or --active passed)')
+  .argument('<text>', 'the memory text')
+  .option('-t, --title <title>', 'title (defaults to the first line of the text)')
+  .option('--type <type>', `one of ${MEMORY_TYPES.join('|')}`, parseType, 'fact' as MemoryType)
+  .option('--tag <tag>', 'tag (repeatable)', collect, [] as string[])
+  .option('--source <ref>', 'source reference, e.g. a file path or URL (repeatable)', collect, [] as string[])
+  .option('--active', 'save directly as active (explicit human approval flag)')
+  .option('--approved', 'alias for --active')
+  .action((text: string, o: { title?: string; type: MemoryType; tag: string[]; source: string[]; active?: boolean; approved?: boolean }) => {
+    const title = o.title ?? (text.split('\n')[0] ?? '').slice(0, 80);
+    const status = (o.active || o.approved) ? 'active' : 'proposed';
+    const m = remember(cwd(), { title, text, type: o.type, tags: o.tag, sources: o.source, status });
+    print(`Saved ${m.id} (${m.type}, ${m.status}, ${m.verification}) -> .recall/${m.file}`);
+    if (m.status === 'proposed') {
+      print(`  Note: Saved as proposed (default-deny gate). Run \`recall approve ${m.id}\` to index it for search.`);
+    }
+  });
+
+program
+  .command('propose')
+  .description('Propose a memory (status: proposed). A human approves it with `recall approve`')
+  .argument('<text>')
+  .requiredOption('-t, --title <title>')
+  .option('--type <type>', `one of ${MEMORY_TYPES.join('|')}`, parseType, 'fact' as MemoryType)
+  .option('--tag <tag>', 'tag (repeatable)', collect, [] as string[])
+  .action((text: string, o: { title: string; type: MemoryType; tag: string[] }) => {
+    const m = propose(cwd(), { title: o.title, text, type: o.type, tags: o.tag, sources: ['proposed'] });
+    print(`Proposed ${m.id} -> .recall/${m.file}\nReview it, then run: recall approve ${m.id}  (or: recall archive ${m.id})`);
+  });
+
+program
+  .command('approve')
+  .description('Activate a proposed memory')
+  .argument('<id>')
+  .action((id: string) => {
+    const m = approve(cwd(), id);
+    print(`Approved ${m.id}: ${m.title}`);
+  });
+
+program
+  .command('archive')
+  .description('Archive a memory (kept on disk, excluded from search; never deletes)')
+  .argument('<id>')
+  .action((id: string) => {
+    const m = archive(cwd(), id);
+    print(`Archived ${m.id}: ${m.title}`);
+  });
+
+program
+  .command('context')
+  .description('Retrieve relevant memories by deterministic keyword search (not semantic search)')
+  .argument('<task>', 'task description')
+  .option('-n, --limit <n>', 'max results', parseLimit, 5)
+  .option('--format <format>', 'text|json', 'text')
+  .option('--include-proposed', 'include unapproved proposals')
+  .option('--include-archived', 'include archived memories')
+  .action((task: string, o: { limit: number; format: string; includeProposed?: boolean; includeArchived?: boolean }) => {
+    if (o.format !== 'text' && o.format !== 'json') throw new RecallError('--format must be text or json.');
+    const hits = context(cwd(), task, { limit: o.limit, includeProposed: !!o.includeProposed, includeArchived: !!o.includeArchived });
+    if (o.format === 'json') {
+      print(JSON.stringify(hits.map((h) => ({
+        id: h.memory.id, title: h.memory.title, type: h.memory.type, status: h.memory.status,
+        verification: h.memory.verification, file: `.recall/${h.memory.file}`, score: h.score, excerpt: h.excerpt,
+      })), null, 2));
+      return;
+    }
+    if (hits.length === 0) {
+      print('No relevant memory found (keyword match on titles, tags, headings and body).');
+      return;
+    }
+    hits.forEach((h, i) => {
+      print(`${i + 1}. ${h.memory.title}  [score: ${h.score} | ${h.memory.type} | ${h.memory.status} | ${h.memory.verification}]`);
+      print(`   .recall/${h.memory.file}`);
+      if (h.excerpt) print(`   ${h.excerpt}`);
+    });
+    print('\nVerify stored assumptions against current code before relying on them.');
+  });
+
+program
+  .command('rebuild')
+  .description('Rebuild INDEX.md deterministically from valid memory files')
+  .action(() => {
+    const p = requireInitialized(cwd());
+    const l = rebuildIndex(p.recallDir);
+    print(`Index rebuilt: ${l.memories.length} memories, ${l.plainDocs.length} rule documents.`);
+    for (const pr of l.problems) print(`  skipped (malformed, not deleted): ${pr.file} - ${pr.error}`);
+  });
+
+program
+  .command('undo')
+  .description('Discard uncommitted changes and remove untracked files in .recall/ (never touches gitignored files)')
+  .option('--dry-run', 'preview files that would be restored or deleted without modifying anything')
+  .option('-f, --force', 'force deletion of untracked memory files without interactive confirmation')
+  .action((o: { dryRun?: boolean; force?: boolean }) => {
+    if (!o.dryRun && !o.force) {
+      const preview = undo(cwd(), { dryRun: true });
+      if (preview.cleaned && preview.cleaned.length > 0) {
+        throw new RecallError(
+          `undo would delete ${preview.cleaned.length} untracked file(s) in .recall/:\n` +
+          preview.cleaned.map((f) => `    ${f}`).join('\n'),
+          'Pass --force to permanently delete untracked files, or --dry-run to inspect them safely.'
+        );
+      }
+    }
+    const res = undo(cwd(), { dryRun: o.dryRun });
+    if (!res.ok) throw new RecallError(res.message);
+    print(res.message);
+    if (res.restored && res.restored.length > 0) {
+      print('  Tracked files restored:');
+      for (const f of res.restored) print(`    ${f}`);
+    }
+    if (res.cleaned && res.cleaned.length > 0) {
+      print('  Untracked files deleted:');
+      for (const f of res.cleaned) print(`    ${f}`);
+    }
+  });
+
+program
+  .command('doctor')
+  .description('Diagnose configuration, files, index, agent integration and Git (never repairs automatically)')
+  .action(() => {
+    const checks = runDoctor(cwd());
+    for (const c of checks) {
+      print(`${c.ok ? 'ok  ' : 'FAIL'} ${c.name}: ${c.detail}`);
+      if (!c.ok && c.fix) print(`       fix: ${c.fix}`);
+    }
+    if (checks.some((c) => !c.ok)) process.exitCode = 1;
+  });
+
+program
+  .command('log')
+  .description('Recent Recall changes (read-only Git history, or local changelog fallback)')
+  .option('-n, --limit <n>', 'max entries', parseLimit, 10)
+  .action((o: { limit: number }) => {
+    const r = log(cwd(), o.limit);
+    if (r.source === 'git') {
+      print('Committed history (.recall/ only):');
+      if (r.committed.length === 0) print('  (no commits touching .recall/ yet)');
+      for (const c of r.committed) print(`  ${c.hash}  ${c.date}  ${c.subject}`);
+      print('\nUncommitted changes:');
+      if (r.uncommitted.length === 0) print('  none');
+      for (const u of r.uncommitted) print(`  ${u}`);
+    } else {
+      print('Git history unavailable; showing the local changelog (NOT a complete history):');
+      if (r.changelog.length === 0) print('  (empty)');
+      for (const l of r.changelog) print(`  ${l}`);
+    }
+  });
+
+program
+  .command('map')
+  .description('Generate or refresh .recall/PROJECT_MAP.md (directory topology, entry points, configs)')
+  .action(() => {
+    const file = map(cwd());
+    print(`Project map generated: ${file}`);
+    print('AI agents can read this file directly instead of running exploratory list_dir scans.');
+  });
+
+program
+  .command('checkpoint')
+  .alias('session')
+  .description('Record an iteration checkpoint in .recall/CURRENT_STATE.md and the session log')
+  .argument('[summary]', 'summary of what was accomplished in this iteration', 'Task checkpoint')
+  .option('-n, --next <steps>', 'immediate next steps for following prompts (only if work remains half-done)')
+  .option('--clear', 'clear active state and mark all previous work as completed')
+  .action((summary: string, o: { next?: string; clear?: boolean }) => {
+    const res = checkpoint(cwd(), summary, { nextSteps: o.next, clear: o.clear });
+    print(`Checkpoint recorded [${res.timestamp}]:`);
+    print(`  Summary: ${res.summary}`);
+    if (res.nextSteps) print(`  Next:    ${res.nextSteps}`);
+    if (res.modifiedFiles.length > 0) {
+      print(`  Active files (${res.modifiedFiles.length}):`);
+      for (const f of res.modifiedFiles.slice(0, 5)) print(`    ${f}`);
+      if (res.modifiedFiles.length > 5) print(`    ... (${res.modifiedFiles.length - 5} more)`);
+    }
+    print('\nUpdated .recall/CURRENT_STATE.md and .recall/sessions/session-log.md.');
+  });
+
+
+program
+  .command('serve')
+  .description('Run a local MCP server over stdio exposing recall_context and recall_propose')
+  .action(() => {
+    requireInitialized(cwd());
+    serveStdio(cwd());
+  });
+
+try {
+  await program.parseAsync(process.argv);
+} catch (err) {
+  if (err instanceof RecallError) {
+    console.error(`recall: ${err.message}`);
+    if (err.hint) console.error(`hint: ${err.hint}`);
+  } else {
+    console.error(`recall: unexpected error: ${(err as Error).message}`);
+  }
+  process.exitCode = 1;
+}

@@ -1,0 +1,59 @@
+{
+  "name": "recall-memory",
+  "version": "0.1.0",
+  "description": "Git-inspired, local-first persistent project memory for AI coding agents.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "recall": "dist/cli/index.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vishnuvmx/recall-memory.git"
+  },
+  "homepage": "https://github.com/vishnuvmx/recall-memory#readme",
+  "bugs": {
+    "url": "https://github.com/vishnuvmx/recall-memory/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "memory",
+    "coding-agents",
+    "git",
+    "mcp",
+    "antigravity",
+    "claude-code",
+    "cursor"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prebench": "npm run build",
+    "bench": "node scripts/benchmark.js",
+    "prepare": "git config core.hooksPath .githooks || true",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "gray-matter": "^4.0.3",
+    "ignore": "^7.0.12",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
