@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { syncAntigravitySupport } from './agent.js';
 import { repoChanges } from './git.js';
 import { generateProjectMap } from './mapper.js';
 import { atomicWrite, resolveInside, today } from '../utils/fs.js';
@@ -75,24 +76,33 @@ export function recordCheckpoint(
   fs.mkdirSync(sessionLogDir, { recursive: true });
   const logFile = path.join(sessionLogDir, 'session-log.md');
 
-  const logEntry = [
+  const entryLines: string[] = [
     `### [${timestamp}] Checkpoint`,
     `- **Summary**: ${cleanSummary}`,
-    result.nextSteps ? `- **Next**: ${result.nextSteps}` : null,
-    modifiedFiles.length > 0 ? `- **Modified**: ${modifiedFiles.join(', ')}` : null,
-    '',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  ];
+  if (result.nextSteps) {
+    entryLines.push(`- **Next**: ${result.nextSteps}`);
+  }
+  if (modifiedFiles.length > 0) {
+    entryLines.push(`- **Modified**: ${modifiedFiles.join(', ')}`);
+  }
+  const logEntry = `${entryLines.join('\n')}\n\n`;
 
-  const existingLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '# Session Log\n\n';
-  atomicWrite(logFile, `${existingLog}${logEntry}`);
+  const existingLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').trimEnd() : '# Session Log';
+  atomicWrite(logFile, `${existingLog}\n\n${logEntry}`);
 
   // Automatically refresh project map and landmarks so line numbers never stay stale
   try {
     generateProjectMap(root, recallDir);
   } catch {
     // Non-fatal if project map regeneration encounters an error
+  }
+
+  // Keep Antigravity always_on rule warm with the latest checkpoint state
+  try {
+    syncAntigravitySupport(root, recallDir);
+  } catch {
+    // Non-fatal if Antigravity sync encounters an error
   }
 
   return result;
