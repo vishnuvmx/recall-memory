@@ -35,10 +35,20 @@ export const memoryMetaSchema = z.object({
 });
 export type MemoryMeta = z.infer<typeof memoryMetaSchema>;
 
+export const PROFILE_TIERS = ['compact', 'standard', 'frontier'] as const;
+export type ProfileTier = (typeof PROFILE_TIERS)[number];
+
+export const PROFILE_BUDGETS: Record<ProfileTier, number> = {
+  compact: 3000,
+  standard: 12000,
+  frontier: 45000,
+};
+
 export const configSchema = z
   .object({
     version: z.literal(1),
     agentFile: z.string().min(1).default('AGENTS.md'),
+    profile: z.enum(PROFILE_TIERS).default('standard'),
   })
   .strict();
 export type RecallConfig = z.infer<typeof configSchema>;

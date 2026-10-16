@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { scanLandmarks, formatLandmarksMarkdown, type FileLandmarks } from './landmarks.js';
+import { loadConfig } from './config.js';
+import { type ProfileTier } from '../schemas/index.js';
 import { atomicWrite, resolveInside, toPosix } from '../utils/fs.js';
 import { applyManagedBlock } from '../utils/managed.js';
 
@@ -131,7 +133,12 @@ export function parseGitignore(root: string): Set<string> {
   return ignores;
 }
 
-export function scanProject(root: string, maxDepth = 3): ProjectMapData {
+export interface ScanProjectOptions {
+  profile?: ProfileTier;
+  recallDir?: string;
+}
+
+export function scanProject(root: string, maxDepth = 3, opts?: ScanProjectOptions): ProjectMapData {
   const isGitignored = createGitignoreFilter(root);
   const entryPoints: string[] = [];
   const configFiles: string[] = [];
@@ -226,7 +233,22 @@ export function scanProject(root: string, maxDepth = 3): ProjectMapData {
   else if (fs.existsSync(path.join(root, 'pyproject.toml')) || fs.existsSync(path.join(root, 'requirements.txt'))) projectType = 'Python';
   else if (fs.existsSync(path.join(root, 'go.mod'))) projectType = 'Go';
 
-  const landmarks = scanLandmarks(root);
+  const profile = opts?.profile ?? 'standard';
+  let minLines = 40;
+  let maxFiles = 25;
+  let maxSymbols = 16;
+
+  if (profile === 'compact') {
+    minLines = 300;
+    maxFiles = 5;
+    maxSymbols = 10;
+  } else if (profile === 'frontier') {
+    minLines = 15;
+    maxFiles = 60;
+    maxSymbols = 30;
+  }
+
+  const landmarks = scanLandmarks(root, minLines, maxFiles, maxSymbols, opts?.recallDir);
 
   return {
     projectType,
@@ -336,7 +358,7 @@ export function buildProjectMapMarkdown(data: ProjectMapData, maxChars = 6000): 
   if (result.length > maxChars) {
     const cut = result.slice(0, maxChars - 160);
     const lastNl = cut.lastIndexOf('\n');
-    result = `${cut.slice(0, lastNl > 0 ? lastNl : cut.length)}\n\n> ... [Project map capped at ${maxChars} chars / ~1,500-1,700 tokens to protect prompt budget.]\n`;
+    result = `${cut.slice(0, lastNl > 0 ? lastNl : cut.length)}\n\n> ... [Project map capped at ${maxChars} chars to protect prompt budget.]\n`;
   }
 
   return result;
@@ -344,17 +366,26 @@ export function buildProjectMapMarkdown(data: ProjectMapData, maxChars = 6000): 
 
 export const MAP_BLOCK_NAME = 'recall:project-map';
 
-export function renderProjectMap(existing: string, data: ProjectMapData): string {
-  const content = buildProjectMapMarkdown(data, 5600);
+export function renderProjectMap(existing: string, data: ProjectMapData, profile: ProfileTier = 'standard'): string {
+  const maxChars = profile === 'compact' ? 5600 : profile === 'frontier' ? 80000 : 24000;
+  const content = buildProjectMapMarkdown(data, maxChars);
   const base = existing.trim() === '' ? '# Project Map\n' : existing;
   return applyManagedBlock(base, content, MAP_BLOCK_NAME);
 }
 
-export function generateProjectMap(root: string, recallDir: string): string {
-  const data = scanProject(root);
+export function generateProjectMap(root: string, recallDir: string, profile?: ProfileTier): string {
+  let effectiveProfile: ProfileTier = profile ?? 'standard';
+  if (!profile) {
+    try {
+      effectiveProfile = loadConfig(recallDir).profile ?? 'standard';
+    } catch {
+      effectiveProfile = 'standard';
+    }
+  }
+  const data = scanProject(root, 3, { profile: effectiveProfile, recallDir });
   const file = resolveInside(recallDir, 'PROJECT_MAP.md');
   const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-  const rendered = renderProjectMap(existing, data);
+  const rendered = renderProjectMap(existing, data, effectiveProfile);
   atomicWrite(file, rendered);
   return file;
 }

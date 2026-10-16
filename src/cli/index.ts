@@ -7,7 +7,7 @@ import { approve, approveAll, archive, archiveAll, checkpoint, context, getPropo
 import { seed } from '../core/seed.js';
 import { requireInitialized } from '../core/project.js';
 import { serveStdio } from '../mcp/server.js';
-import { MEMORY_TYPES, type MemoryType } from '../schemas/index.js';
+import { MEMORY_TYPES, PROFILE_TIERS, type MemoryType, type ProfileTier } from '../schemas/index.js';
 import { RecallError } from '../utils/fs.js';
 
 const cwd = (): string => process.cwd();
@@ -31,8 +31,12 @@ program
   .command('init')
   .description('Create .recall/ and install the managed agent-instruction block (idempotent, never overwrites)')
   .option('--no-agent', 'do not touch the agent instruction file')
-  .action((o: { agent: boolean }) => {
-    const r = initProject(cwd(), { agent: o.agent });
+  .option('--profile <tier>', `model context tier (${PROFILE_TIERS.join('|')})`, 'standard')
+  .action((o: { agent: boolean; profile: string }) => {
+    if (!PROFILE_TIERS.includes(o.profile as ProfileTier)) {
+      throw new InvalidArgumentError(`--profile must be one of: ${PROFILE_TIERS.join(', ')}`);
+    }
+    const r = initProject(cwd(), { agent: o.agent, profile: o.profile as ProfileTier });
     print(`Project root: ${r.project.root} (${r.project.source === 'cwd' ? 'no Git repo or .recall found; using current directory' : `found via ${r.project.source}`})`);
     for (const f of r.created) print(`  created  ${f}`);
     for (const f of r.skipped) print(`  kept     ${f}`);
@@ -62,7 +66,8 @@ program
     print(`Agent file ${s.agentFile}: ${s.agent}`);
 
     if (s.tokens) {
-      print(`Orientation footprint: ~${s.tokens.totalTokens.toLocaleString()} tokens (budget: ${s.tokens.budgetTokens.toLocaleString()} max)`);
+      print(`Model profile: ${s.profile} (orientation budget: ~${s.tokens.budgetTokens.toLocaleString()} tokens)`);
+      print(`Orientation footprint: ~${s.tokens.totalTokens.toLocaleString()} tokens`);
       for (const [file, tok] of Object.entries(s.tokens.files)) {
         if (tok > 0) print(`  - ${file.padEnd(18)} ~${tok.toLocaleString()} tokens`);
       }
@@ -310,11 +315,15 @@ program
 
 program
   .command('map')
-  .description('Generate or refresh .recall/PROJECT_MAP.md (directory topology, entry points, configs)')
-  .action(() => {
-    const file = map(cwd());
+  .description('Generate or refresh .recall/PROJECT_MAP.md (directory topology, entry points, configs, landmarks)')
+  .option('--profile <tier>', `context tier (${PROFILE_TIERS.join('|')})`)
+  .action((o: { profile?: string }) => {
+    if (o.profile && !PROFILE_TIERS.includes(o.profile as ProfileTier)) {
+      throw new InvalidArgumentError(`--profile must be one of: ${PROFILE_TIERS.join(', ')}`);
+    }
+    const file = map(cwd(), o.profile as ProfileTier | undefined);
     print(`Project map generated: ${file}`);
-    print('AI agents can read this file directly instead of running exploratory list_dir scans.');
+    print('AI agents can read this file directly instead of running exploratory list_dir scans or crawling raw code.');
   });
 
 program

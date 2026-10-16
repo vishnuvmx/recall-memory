@@ -5,7 +5,7 @@ import { DEFAULT_IGNORED_DIRS, createGitignoreFilter } from './mapper.js';
 
 export interface Landmark {
   name: string;
-  kind: 'class' | 'method' | 'function' | 'section';
+  kind: 'class' | 'method' | 'function' | 'section' | 'interface' | 'type';
   line: number;
 }
 
@@ -77,6 +77,18 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
       const classMatch = /^(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z0-9_]+)/.exec(line);
       if (classMatch) {
         landmarks.push({ name: classMatch[1]!, kind: 'class', line: lineNum });
+        continue;
+      }
+      // Interfaces
+      const ifaceMatch = /^(?:export\s+)?interface\s+([A-Za-z0-9_]+)/.exec(line);
+      if (ifaceMatch) {
+        landmarks.push({ name: ifaceMatch[1]!, kind: 'interface', line: lineNum });
+        continue;
+      }
+      // Types
+      const typeMatch = /^(?:export\s+)?type\s+([A-Za-z0-9_]+)\s*(?:<[^=]+>)?\s*=/.exec(line);
+      if (typeMatch) {
+        landmarks.push({ name: typeMatch[1]!, kind: 'type', line: lineNum });
         continue;
       }
       // Functions / Arrow functions / Methods
@@ -203,12 +215,40 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
   return landmarks;
 }
 
+interface CacheRecord {
+  mtimeMs: number;
+  totalLines: number;
+  landmarks: Landmark[];
+}
+
 /**
- * Scans the project for large files (>= minLines) and extracts landmark locations.
+ * Scans the project for files (>= minLines) and extracts landmark locations with MTime caching.
  */
-export function scanLandmarks(root: string, minLines = 300, maxFiles = 5, maxSymbols = 12): FileLandmarks[] {
+export function scanLandmarks(
+  root: string,
+  minLines = 300,
+  maxFiles = 5,
+  maxSymbols = 12,
+  recallDir?: string,
+): FileLandmarks[] {
   const results: FileLandmarks[] = [];
   const isGitignored = createGitignoreFilter(root);
+
+  // Load MTime cache if recallDir is provided
+  let cacheFile = '';
+  let cache: Record<string, CacheRecord> = {};
+  let cacheDirty = false;
+
+  if (recallDir) {
+    cacheFile = path.join(recallDir, '.cache', 'landmarks-cache.json');
+    if (fs.existsSync(cacheFile)) {
+      try {
+        cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      } catch {
+        cache = {};
+      }
+    }
+  }
 
   function walk(currentDir: string): void {
     let entries: fs.Dirent[] = [];
@@ -235,18 +275,28 @@ export function scanLandmarks(root: string, minLines = 300, maxFiles = 5, maxSym
           const fullPath = path.join(currentDir, entry.name);
           const stat = fs.statSync(fullPath);
           if (stat.size > 2 * 1024 * 1024) continue; // skip files > 2 MB
-          const content = fs.readFileSync(fullPath, 'utf8');
-          const linesCount = content.split('\n').length;
-          if (linesCount >= minLines) {
-            const rel = toPosix(path.relative(root, fullPath));
-            const landmarks = extractLandmarks(content, ext);
-            if (landmarks.length > 0) {
-              results.push({
-                relativePath: rel,
-                totalLines: linesCount,
-                landmarks: landmarks.slice(0, maxSymbols),
-              });
-            }
+
+          let linesCount = 0;
+          let landmarks: Landmark[] = [];
+
+          const cached = cache[rel];
+          if (cached && cached.mtimeMs === stat.mtimeMs) {
+            linesCount = cached.totalLines;
+            landmarks = cached.landmarks;
+          } else {
+            const content = fs.readFileSync(fullPath, 'utf8');
+            linesCount = content.split('\n').length;
+            landmarks = extractLandmarks(content, ext);
+            cache[rel] = { mtimeMs: stat.mtimeMs, totalLines: linesCount, landmarks };
+            cacheDirty = true;
+          }
+
+          if (linesCount >= minLines && landmarks.length > 0) {
+            results.push({
+              relativePath: rel,
+              totalLines: linesCount,
+              landmarks: landmarks.slice(0, maxSymbols),
+            });
           }
         } catch {
           // ignore unreadable files
@@ -256,7 +306,19 @@ export function scanLandmarks(root: string, minLines = 300, maxFiles = 5, maxSym
   }
 
   walk(root);
-  // Sort descending by totalLines so the biggest "god files" come first
+
+  // Write updated cache if dirty
+  if (recallDir && cacheDirty) {
+    try {
+      const cacheDir = path.dirname(cacheFile);
+      if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+      fs.writeFileSync(cacheFile, JSON.stringify(cache), 'utf8');
+    } catch {
+      // ignore cache write failures
+    }
+  }
+
+  // Sort descending by totalLines so the biggest files come first
   results.sort((a, b) => b.totalLines - a.totalLines);
   return results.slice(0, maxFiles);
 }
@@ -265,8 +327,8 @@ export function formatLandmarksMarkdown(files: FileLandmarks[]): string {
   if (files.length === 0) return '';
 
   const lines: string[] = [
-    '## Large File Landmarks (Direct Jump Targets)',
-    '> **AI AGENTS**: Do NOT grep inside these files. Use these line numbers to jump directly to target functions and classes.',
+    '## Large File Landmarks & Codebase API Surface (Direct Jump Targets)',
+    '> **AI AGENTS**: Do NOT grep inside these files or re-read them to discover APIs. Use these line numbers and symbol signatures directly.',
     '',
   ];
 

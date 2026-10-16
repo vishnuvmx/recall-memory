@@ -7,6 +7,7 @@ import { generateProjectMap } from './mapper.js';
 import { appendChangelog, createMemory, loadAll, updateMemory, type Memory, type NewMemory } from './memory.js';
 import { requireInitialized, type Project } from './project.js';
 import { search, type SearchHit, type SearchOptions } from './retrieval.js';
+import { PROFILE_BUDGETS, type ProfileTier } from '../schemas/index.js';
 import fs from 'node:fs';
 import { resolveInside } from '../utils/fs.js';
 
@@ -48,6 +49,7 @@ export function context(start: string, query: string, opts: SearchOptions): Sear
 export interface TokenFootprint {
   totalTokens: number;
   budgetTokens: number;
+  profile: ProfileTier;
   files: Record<string, number>;
 }
 
@@ -61,13 +63,14 @@ export interface StatusReport {
   agent: AgentState | 'unknown';
   git: { available: boolean; isRepo: boolean; changes: string[] | null };
   tokens: TokenFootprint;
+  profile: ProfileTier;
 }
 
 function estimateTokens(chars: number): number {
   return Math.ceil(chars / 4);
 }
 
-function computeTokenFootprint(recallDir: string): TokenFootprint {
+function computeTokenFootprint(recallDir: string, profile: ProfileTier = 'standard'): TokenFootprint {
   const targets = ['MEMORY.md', 'INDEX.md', 'PROJECT_MAP.md', 'CURRENT_STATE.md'];
   const files: Record<string, number> = {};
   let totalChars = 0;
@@ -90,7 +93,8 @@ function computeTokenFootprint(recallDir: string): TokenFootprint {
 
   return {
     totalTokens: estimateTokens(totalChars),
-    budgetTokens: 3000,
+    budgetTokens: PROFILE_BUDGETS[profile],
+    profile,
     files,
   };
 }
@@ -105,8 +109,11 @@ export function status(start: string): StatusReport {
   };
   let agentFile = 'AGENTS.md';
   let agent: StatusReport['agent'] = 'unknown';
+  let profile: ProfileTier = 'standard';
   try {
-    agentFile = loadConfig(p.recallDir).agentFile;
+    const cfg = loadConfig(p.recallDir);
+    agentFile = cfg.agentFile;
+    profile = cfg.profile ?? 'standard';
     agent = agentState(p.root, agentFile);
   } catch {
     /* surfaced by `recall doctor` */
@@ -121,7 +128,8 @@ export function status(start: string): StatusReport {
     agentFile,
     agent,
     git: { ...g, changes: g.isRepo ? recallChanges(p.root) : null },
-    tokens: computeTokenFootprint(p.recallDir),
+    tokens: computeTokenFootprint(p.recallDir, profile),
+    profile,
   };
 }
 
@@ -181,9 +189,9 @@ export function log(start: string, limit: number): LogReport {
   return { source: 'changelog', committed: [], uncommitted: [], changelog: lines.slice(-limit).reverse() };
 }
 
-export function map(start: string): string {
+export function map(start: string, profile?: ProfileTier): string {
   const p = requireInitialized(start);
-  return generateProjectMap(p.root, p.recallDir);
+  return generateProjectMap(p.root, p.recallDir, profile);
 }
 
 export function checkpoint(start: string, summary: string, opts?: CheckpointOptions): CheckpointResult {

@@ -11,16 +11,16 @@ trigger: always_on
 - Read-only Git ops: Never commit, push, or stage workspace code automatically.
 
 ## Current Working State
-> **Last Updated**: 2026-10-16 12:52:16
+> **Last Updated**: 2026-10-16 13:03:00
 ## Previous Progress
-Added recall seed, recall review, token footprint metrics in status, context filters, and 4 new landmark languages
+Added adaptive model tiers (compact, standard, frontier), full codebase API surface extraction, and MTime digest cache
 ## Files Modified in Previous Task
-- `.agents/rules/recall.md`
-- `README.md`
-- `package.json`
 - `src/cli/index.ts`
+- `src/core/config.ts`
+- `src/core/init.ts`
 - `src/core/landmarks.ts`
-- _(+6 other files)_
+- `src/core/mapper.ts`
+- _(+3 other files)_
 
 ## Protocol
 1. User Request Priority: The user's prompt is ALWAYS primary objective #1.

@@ -9,6 +9,8 @@ import { findProject, type Project } from './project.js';
 import { CHANGELOG_MD, MEMORY_MD, RULE_TEMPLATES } from '../templates/index.js';
 import { writeNew } from '../utils/fs.js';
 
+import { PROFILE_TIERS, type ProfileTier } from '../schemas/index.js';
+
 export interface InitReport {
   project: Project;
   created: string[];
@@ -19,7 +21,7 @@ export interface InitReport {
 const DIRS = ['rules', 'decisions', 'lessons', 'tasks', 'sessions', 'logs'];
 
 /** Idempotent scaffolding. Never overwrites, never touches Git, never reads source files. */
-export function initProject(start: string, opts: { agent?: boolean } = {}): InitReport {
+export function initProject(start: string, opts: { agent?: boolean; profile?: ProfileTier } = {}): InitReport {
   const project = findProject(start);
   const { recallDir, root } = project;
   const created: string[] = [];
@@ -35,11 +37,13 @@ export function initProject(start: string, opts: { agent?: boolean } = {}): Init
     loadConfig(recallDir); // fail loudly on a malformed config rather than overwrite it
     skipped.push('.recall/config.json');
   } else {
-    writeConfig(recallDir, defaultConfig());
+    const cfg = defaultConfig();
+    if (opts.profile) cfg.profile = opts.profile;
+    writeConfig(recallDir, cfg);
     created.push('.recall/config.json');
   }
   put('MEMORY.md', MEMORY_MD);
-  put('.gitignore', '# Local ephemeral agent state (optional; un-comment to prevent PR merge conflicts)\n# PROJECT_MAP.md\n# CURRENT_STATE.md\n# sessions/\n');
+  put('.gitignore', '# Local ephemeral agent state\n# PROJECT_MAP.md\n# CURRENT_STATE.md\n# sessions/\n.cache/\n');
   for (const [name, text] of Object.entries(RULE_TEMPLATES)) put(`rules/${name}`, text);
   put('logs/CHANGELOG.md', CHANGELOG_MD);
   put('CURRENT_STATE.md', initialCurrentStateMarkdown());
@@ -49,7 +53,7 @@ export function initProject(start: string, opts: { agent?: boolean } = {}): Init
   const agent = opts.agent === false ? 'skipped' : installAgentBlock(root, cfg.agentFile);
 
   const hadMap = fs.existsSync(path.join(recallDir, 'PROJECT_MAP.md'));
-  generateProjectMap(root, recallDir);
+  generateProjectMap(root, recallDir, cfg.profile);
   (hadMap ? skipped : created).push('.recall/PROJECT_MAP.md');
 
   const hadIndex = fs.existsSync(path.join(recallDir, 'INDEX.md'));

@@ -371,11 +371,12 @@ describe('seed', () => {
 });
 
 describe('token footprint', () => {
-  it('computes orientation token counts and adheres to budget', () => {
+  it('computes orientation token counts and adheres to budget across profile tiers', () => {
     const root = setup();
     const st = status(root);
     expect(st.tokens).toBeDefined();
-    expect(st.tokens.budgetTokens).toBe(3000);
+    expect(st.profile).toBe('standard');
+    expect(st.tokens.budgetTokens).toBe(12000);
     expect(st.tokens.totalTokens).toBeGreaterThan(0);
     expect(st.tokens.totalTokens).toBeLessThan(st.tokens.budgetTokens);
     expect(st.tokens.files['MEMORY.md']).toBeDefined();
