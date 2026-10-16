@@ -180,4 +180,48 @@ async def standalone_handler():
     expect(names).toContain('execute_task');
     expect(names).toContain('standalone_handler');
   });
+
+  it('extracts C#, C++, PHP, and Ruby landmarks', () => {
+    const csCode = `
+namespace MyApp;
+public class AccountManager {
+  public async Task ProcessPayment(string id) {}
+}
+`;
+    const csLandmarks = extractLandmarks(csCode, '.cs');
+    expect(csLandmarks.map((l) => l.name)).toContain('AccountManager');
+    expect(csLandmarks.map((l) => l.name)).toContain('ProcessPayment');
+
+    const cppCode = `
+class EngineController {
+  void initSubsystems() {
+  }
+};
+`;
+    const cppLandmarks = extractLandmarks(cppCode, '.cpp');
+    expect(cppLandmarks.map((l) => l.name)).toContain('EngineController');
+    expect(cppLandmarks.map((l) => l.name)).toContain('initSubsystems');
+
+    const phpCode = `
+<?php
+class UserRepository {
+  public function findById($id) {}
+}
+`;
+    const phpLandmarks = extractLandmarks(phpCode, '.php');
+    expect(phpLandmarks.map((l) => l.name)).toContain('UserRepository');
+    expect(phpLandmarks.map((l) => l.name)).toContain('findById');
+
+    const rbCode = `
+module Auth
+  class SessionManager
+    def authenticate_user(token)
+    end
+  end
+end
+`;
+    const rbLandmarks = extractLandmarks(rbCode, '.rb');
+    expect(rbLandmarks.map((l) => l.name)).toContain('SessionManager');
+    expect(rbLandmarks.map((l) => l.name)).toContain('authenticate_user');
+  });
 });

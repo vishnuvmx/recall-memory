@@ -11,14 +11,16 @@ trigger: always_on
 - Read-only Git ops: Never commit, push, or stage workspace code automatically.
 
 ## Current Working State
-> **Last Updated**: 2026-10-14 15:31:40
+> **Last Updated**: 2026-10-16 12:52:16
 ## Previous Progress
-Eliminated Antigravity cold starts with auto-synced warm rules, managed block preservation, token budget caps, and secret validation
+Added recall seed, recall review, token footprint metrics in status, context filters, and 4 new landmark languages
 ## Files Modified in Previous Task
 - `.agents/rules/recall.md`
-- `src/core/agent.ts`
-- `src/core/checkpoint.ts`
-- `tests/checkpoint.test.ts`
+- `README.md`
+- `package.json`
+- `src/cli/index.ts`
+- `src/core/landmarks.ts`
+- _(+6 other files)_
 
 ## Protocol
 1. User Request Priority: The user's prompt is ALWAYS primary objective #1.

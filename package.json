@@ -1,5 +1,5 @@
 {
-  "name": "recall-memory",
+  "name": "@vishnuvmx/recall-memory",
   "version": "0.1.0",
   "description": "Git-inspired, local-first persistent project memory for AI coding agents.",
   "type": "module",
@@ -33,6 +33,9 @@
     "README.md",
     "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=20"
   },

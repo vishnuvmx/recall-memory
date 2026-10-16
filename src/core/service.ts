@@ -45,6 +45,12 @@ export function context(start: string, query: string, opts: SearchOptions): Sear
   return search(loadAll(p.recallDir).memories, query, opts);
 }
 
+export interface TokenFootprint {
+  totalTokens: number;
+  budgetTokens: number;
+  files: Record<string, number>;
+}
+
 export interface StatusReport {
   project: Project;
   byType: Record<string, number>;
@@ -54,6 +60,39 @@ export interface StatusReport {
   agentFile: string;
   agent: AgentState | 'unknown';
   git: { available: boolean; isRepo: boolean; changes: string[] | null };
+  tokens: TokenFootprint;
+}
+
+function estimateTokens(chars: number): number {
+  return Math.ceil(chars / 4);
+}
+
+function computeTokenFootprint(recallDir: string): TokenFootprint {
+  const targets = ['MEMORY.md', 'INDEX.md', 'PROJECT_MAP.md', 'CURRENT_STATE.md'];
+  const files: Record<string, number> = {};
+  let totalChars = 0;
+
+  for (const f of targets) {
+    const p = resolveInside(recallDir, f);
+    if (fs.existsSync(p)) {
+      try {
+        const content = fs.readFileSync(p, 'utf8');
+        const tok = estimateTokens(content.length);
+        files[f] = tok;
+        totalChars += content.length;
+      } catch {
+        files[f] = 0;
+      }
+    } else {
+      files[f] = 0;
+    }
+  }
+
+  return {
+    totalTokens: estimateTokens(totalChars),
+    budgetTokens: 3000,
+    files,
+  };
 }
 
 export function status(start: string): StatusReport {
@@ -82,7 +121,43 @@ export function status(start: string): StatusReport {
     agentFile,
     agent,
     git: { ...g, changes: g.isRepo ? recallChanges(p.root) : null },
+    tokens: computeTokenFootprint(p.recallDir),
   };
+}
+
+export function getProposals(start: string): Memory[] {
+  const p = requireInitialized(start);
+  return loadAll(p.recallDir).memories.filter((m) => m.status === 'proposed');
+}
+
+export function approveAll(start: string): Memory[] {
+  const p = requireInitialized(start);
+  const proposals = getProposals(start);
+  const approved: Memory[] = [];
+  for (const m of proposals) {
+    const updated = updateMemory(p.recallDir, m.id, { status: 'active' });
+    appendChangelog(p.recallDir, 'approve', updated);
+    approved.push(updated);
+  }
+  if (approved.length > 0) {
+    rebuildIndex(p.recallDir);
+  }
+  return approved;
+}
+
+export function archiveAll(start: string): Memory[] {
+  const p = requireInitialized(start);
+  const proposals = getProposals(start);
+  const archived: Memory[] = [];
+  for (const m of proposals) {
+    const updated = updateMemory(p.recallDir, m.id, { status: 'archived' });
+    appendChangelog(p.recallDir, 'archive', updated);
+    archived.push(updated);
+  }
+  if (archived.length > 0) {
+    rebuildIndex(p.recallDir);
+  }
+  return archived;
 }
 
 export interface LogReport {

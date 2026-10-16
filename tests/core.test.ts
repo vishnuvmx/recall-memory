@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { initProject } from '../src/core/init.js';
 import { loadAll } from '../src/core/memory.js';
 import { indexState, rebuildIndex, brokenIndexLinks } from '../src/core/index-builder.js';
-import { approve, archive, context, log, propose, remember, status, undo } from '../src/core/service.js';
+import { approve, approveAll, archive, archiveAll, context, getProposals, log, propose, remember, status, undo } from '../src/core/service.js';
+import { seed } from '../src/core/seed.js';
 import { runDoctor } from '../src/core/doctor.js';
 import { handleMessage } from '../src/mcp/server.js';
 import { RecallError } from '../src/utils/fs.js';
@@ -132,6 +133,27 @@ describe('context search', () => {
     const buildHits = context(root, 'building', {});
     expect(buildHits).toHaveLength(1);
     expect(buildHits[0]!.memory.title).toBe('Docker build optimization');
+  });
+  it('filters by type and tag', () => {
+    const root = setup();
+    remember(root, { title: 'Auth session cookie storage', text: 'Store tokens in httpOnly cookies.', type: 'decision', tags: ['auth', 'security'] });
+    remember(root, { title: 'Auth token expiration bug', text: 'Expired tokens crash session.', type: 'bugfix', tags: ['auth'] });
+    remember(root, { title: 'Database schema migration', text: 'Run migrations on boot.', type: 'decision', tags: ['database'] });
+
+    const allAuth = context(root, 'auth', {});
+    expect(allAuth).toHaveLength(2);
+
+    const decisionOnly = context(root, 'auth', { type: 'decision' });
+    expect(decisionOnly).toHaveLength(1);
+    expect(decisionOnly[0]!.memory.type).toBe('decision');
+
+    const bugfixOnly = context(root, 'auth', { type: 'bugfix' });
+    expect(bugfixOnly).toHaveLength(1);
+    expect(bugfixOnly[0]!.memory.type).toBe('bugfix');
+
+    const securityTagOnly = context(root, 'auth', { tag: 'security' });
+    expect(securityTagOnly).toHaveLength(1);
+    expect(securityTagOnly[0]!.memory.title).toBe('Auth session cookie storage');
   });
 });
 
@@ -277,6 +299,87 @@ describe('mcp', () => {
     const stat = handleMessage(root, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'recall_status', arguments: {} } }) as any;
     expect(stat.result.content[0].text).toContain('Recall Status');
     expect(handleMessage(root, { jsonrpc: '2.0', method: 'notifications/initialized' })).toBeNull();
+  });
+});
+
+describe('proposals batch operations', () => {
+  it('handles getProposals, approveAll, and archiveAll', () => {
+    const root = setup();
+    propose(root, { title: 'First proposal', text: 'Proposal 1 text' });
+    propose(root, { title: 'Second proposal', text: 'Proposal 2 text' });
+
+    const props = getProposals(root);
+    expect(props).toHaveLength(2);
+    expect(props.map((p) => p.title)).toContain('First proposal');
+    expect(props.map((p) => p.title)).toContain('Second proposal');
+
+    // Approve all
+    const approved = approveAll(root);
+    expect(approved).toHaveLength(2);
+    expect(approved.every((a) => a.status === 'active')).toBe(true);
+    expect(getProposals(root)).toHaveLength(0);
+
+    // Add another proposal and archive all
+    propose(root, { title: 'Third proposal', text: 'Proposal 3 text' });
+    expect(getProposals(root)).toHaveLength(1);
+    const archived = archiveAll(root);
+    expect(archived).toHaveLength(1);
+    expect(archived[0]!.status === 'archived').toBe(true);
+    expect(getProposals(root)).toHaveLength(0);
+  });
+});
+
+describe('seed', () => {
+  it('mines markdown docs into proposed memories', () => {
+    const root = setup();
+    const docDir = path.join(root, 'docs');
+    fs.mkdirSync(docDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(docDir, 'architecture.md'),
+      '# My System\n\n## Database Isolation\n\nAll database writes must go through the repository abstraction layer to allow mock testing.\n\n## Event Bus\n\nEvents are published synchronously in transaction boundaries.\n'
+    );
+
+    const res = seed(root, { from: 'docs' });
+    expect(res.proposed.length).toBeGreaterThan(0);
+    expect(res.proposed.some((p) => p.title === 'Database Isolation')).toBe(true);
+
+    const proposals = getProposals(root);
+    expect(proposals.some((p) => p.title === 'Database Isolation')).toBe(true);
+
+    // Deduplication check: running seed again should not duplicate
+    const res2 = seed(root, { from: 'docs' });
+    expect(res2.proposed).toHaveLength(0);
+  });
+
+  it('supports dry-run mode without modifying disk', () => {
+    const root = setup();
+    const docDir = path.join(root, 'docs');
+    fs.mkdirSync(docDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(docDir, 'adr.md'),
+      '## Caching Strategy\n\nUse Redis memory cache with TTL of 1 hour for all product listing pages.\n'
+    );
+
+    const dry = seed(root, { from: 'docs', dryRun: true });
+    expect(dry.dryRun).toBe(true);
+    expect(dry.proposed.length).toBe(1);
+    expect(dry.proposed[0]!.title).toBe('Caching Strategy');
+
+    // Confirm nothing was written to disk
+    expect(getProposals(root)).toHaveLength(0);
+  });
+});
+
+describe('token footprint', () => {
+  it('computes orientation token counts and adheres to budget', () => {
+    const root = setup();
+    const st = status(root);
+    expect(st.tokens).toBeDefined();
+    expect(st.tokens.budgetTokens).toBe(3000);
+    expect(st.tokens.totalTokens).toBeGreaterThan(0);
+    expect(st.tokens.totalTokens).toBeLessThan(st.tokens.budgetTokens);
+    expect(st.tokens.files['MEMORY.md']).toBeDefined();
+    expect(st.tokens.files['INDEX.md']).toBeDefined();
   });
 });
 

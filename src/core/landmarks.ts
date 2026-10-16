@@ -27,6 +27,13 @@ const SUPPORTED_EXTS = new Set([
   '.py',
   '.rs',
   '.go',
+  '.cs',
+  '.c',
+  '.cpp',
+  '.h',
+  '.hpp',
+  '.php',
+  '.rb',
 ]);
 
 /**
@@ -149,6 +156,46 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
       const rsFn = /^(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z0-9_]+)/.exec(line);
       if (rsFn) {
         landmarks.push({ name: rsFn[1]!, kind: 'function', line: lineNum });
+      }
+    } else if (ext === '.cs') {
+      const csType = /^(?:(?:public|private|protected|internal|static|abstract|sealed|partial)\s+)*(?:class|interface|struct|record)\s+([A-Za-z0-9_]+)/.exec(line);
+      if (csType) {
+        landmarks.push({ name: csType[1]!, kind: 'class', line: lineNum });
+        continue;
+      }
+      const csMethod = /^(?:(?:public|private|protected|internal|static|virtual|override|async)\s+)+[A-Za-z0-9_<>?[\]]+\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*(?:=>|\{)/.exec(line);
+      if (csMethod) {
+        landmarks.push({ name: csMethod[1]!, kind: 'method', line: lineNum });
+      }
+    } else if (ext === '.c' || ext === '.cpp' || ext === '.h' || ext === '.hpp') {
+      const cppType = /^(?:class|struct)\s+([A-Za-z0-9_]+)\s*(?::|\{)/.exec(line);
+      if (cppType) {
+        landmarks.push({ name: cppType[1]!, kind: 'class', line: lineNum });
+        continue;
+      }
+      const cppFn = /^(?:[A-Za-z0-9_*&<>]+\s+)+([A-Za-z0-9_]+)\s*\([^;)]*\)\s*(?:const)?\s*\{/.exec(line);
+      if (cppFn && !['if', 'for', 'while', 'switch', 'catch'].includes(cppFn[1]!)) {
+        landmarks.push({ name: cppFn[1]!, kind: 'function', line: lineNum });
+      }
+    } else if (ext === '.php') {
+      const phpClass = /^(?:final\s+|abstract\s+)?(?:class|interface|trait|enum)\s+([A-Za-z0-9_]+)/.exec(line);
+      if (phpClass) {
+        landmarks.push({ name: phpClass[1]!, kind: 'class', line: lineNum });
+        continue;
+      }
+      const phpFn = /^(?:(?:public|protected|private|static|final)\s+)*function\s+([A-Za-z0-9_]+)\s*\(/.exec(line);
+      if (phpFn) {
+        landmarks.push({ name: phpFn[1]!, kind: 'function', line: lineNum });
+      }
+    } else if (ext === '.rb') {
+      const rbType = /^\s*(?:class|module)\s+([A-Za-z0-9_:]+)/.exec(line);
+      if (rbType) {
+        landmarks.push({ name: rbType[1]!, kind: 'class', line: lineNum });
+        continue;
+      }
+      const rbMethod = /^\s*def\s+([A-Za-z0-9_!?.]+)/.exec(line);
+      if (rbMethod) {
+        landmarks.push({ name: rbMethod[1]!, kind: 'method', line: lineNum });
       }
     }
   }

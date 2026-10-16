@@ -74,14 +74,21 @@ AI coding agents forget everything between sessions and waste tokens re-scanning
 ---
 
 ## 🌱 Cold Start & Seeding
-
-When you run `recall init`, `.recall/` starts empty with scaffolding and project topology. It does not automatically extract past decisions from Slack or Git history.
-
-To build meaningful memory from day one:
-
-1. **Initial Seeding:** Run an agent-assisted pass over existing `docs/adr/`, README notes, or recent `git log` commits to propose architectural decisions (`recall propose "<text>" -t "<title>"`).
-2. **Human Approval:** Review and promote approved records using `recall approve <id>`.
-3. **Iterative Accumulation:** As your team and agent encounter tricky bugfixes or reject approaches, record them (`--type failed_approach` or `--type lesson`) to protect future turns.
+ 
+To build meaningful memory from day one without manually typing out architectural records:
+ 
+1. **Automated Seeding (`recall seed`):** Analyze your recent git commits and repository documentation (`docs/`) to auto-propose initial architectural decisions and bugfixes:
+   ```bash
+   recall seed               # mines git history and docs/ into proposed memories
+   recall seed --from docs   # only inspect documentation files
+   recall seed --dry-run     # preview what would be proposed without saving
+   ```
+2. **Review & Batch Approval (`recall review`):** Inspect the mined proposals and approve them in one step:
+   ```bash
+   recall review             # inspect pending proposed memories
+   recall review --approve-all   # activate all proposals to index them for search
+   ```
+3. **Iterative Accumulation:** As your team and agent encounter tricky bugfixes or reject approaches, record them (`recall remember "..." --type failed_approach` or `--type lesson`) to protect future turns.
 
 ---
 
@@ -101,6 +108,14 @@ To build meaningful memory from day one:
 ## 📦 Installation
 
 **Requirements:** Node.js ≥ 20 and Git (recommended).
+
+### From npm (available from the 22 Oct launch)
+
+```bash
+npm install -g @vishnuvmx/recall-memory   # exposes the `recall` command
+# or run without installing:
+npx @vishnuvmx/recall-memory init
+```
 
 ### From source
 
@@ -164,14 +179,16 @@ Memory files are Markdown with validated YAML frontmatter (`id, title, type, cre
 | Command                                                              | What it does                                                                                                                                               |
 | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `recall init [--no-agent]`                                           | Scaffolds `.recall/`, maps the project, initializes state, and installs the anti-scan protocol in `AGENTS.md`. Preserves existing content outside markers. |
+| `recall seed [--from git\|docs\|all] [-n N] [--dry-run]`              | Automatically mines Git commit history and documentation (`docs/`) into proposed architectural memories. Solves the cold-start problem.                   |
+| `recall review [--approve-all] [--archive-all]`                      | Lists pending proposed memories and allows batch activation or archiving.                                                                                  |
 | `recall map`                                                         | Re-scans the repository (respecting `.gitignore`) up to depth 3. Regenerates `PROJECT_MAP.md` and file line landmarks.                                     |
 | `recall checkpoint <summary> [-n next]`                              | Records an iteration snapshot into `CURRENT_STATE.md`, detects Git-modified files, and auto-refreshes landmarks.                                           |
 | `recall remember <text> [-t title] [--type T] [--tag X]… [--active]` | Saves exact text as a memory note (`proposed` by default; pass `--active` for immediate active status). Rejects secret-looking content.                    |
 | `recall propose <text> -t title [--type T]`                          | Saves memory with status `proposed`. Excluded from search until promoted by a human.                                                                       |
 | `recall approve <id>`                                                | Promotes a `proposed` memory to `active`, indexing it for future retrieval.                                                                                |
 | `recall archive <id>`                                                | Sets status to `archived`. Kept on disk for history but excluded from default search. Never deletes files.                                                 |
-| `recall context <task> [-n N] [--format text\|json]`                 | Local keyword & suffix-stemmed search. Ranks title, tag, heading, and body hits.                                                                           |
-| `recall status`                                                      | Displays counts by type/status, index integrity, agent integration, and uncommitted `.recall/` changes.                                                    |
+| `recall context <task> [-n N] [--type T] [--tag X] [--format json]`  | Local keyword, tag, and suffix-stemmed search. Ranks title, tag, heading, body hits, and recency.                                                          |
+| `recall status [--json]`                                             | Displays memory counts, orientation token footprint against budget (~3,000 max), agent integration, and uncommitted changes.                              |
 | `recall log [-n N]`                                                  | Displays read-only Git history for `.recall/` (or falls back to local changelog).                                                                          |
 | `recall rebuild`                                                     | Deterministically rebuilds `INDEX.md`. Preserves user notes outside markers; reports malformed files without deleting them.                                |
 | `recall undo [--dry-run]`                                            | Safely discards uncommitted changes and removes untracked files in `.recall/`. Never touches gitignored files or project source code.                      |
@@ -246,6 +263,10 @@ The landmark engine parses symbols in files with 300+ lines across:
 | **Python**                  | `.py`                     | Classes, `def` functions                                  |
 | **Go**                      | `.go`                     | Struct types, functions/methods                           |
 | **Rust**                    | `.rs`                     | Structs, enums, traits, `fn`                              |
+| **C#**                      | `.cs`                     | Classes, interfaces, structs, records, `async` methods    |
+| **C / C++**                 | `.c` `.cpp` `.h` `.hpp`   | Classes, structs, functions                               |
+| **PHP**                     | `.php`                    | Classes, interfaces, traits, functions/methods            |
+| **Ruby**                    | `.rb`                     | Classes, modules, `def` methods                           |
 
 Unsupported file types are still mapped in the directory tree; symbol landmarking is skipped cleanly without error.
 

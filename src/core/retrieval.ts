@@ -1,9 +1,13 @@
+import type { MemoryType } from '../schemas/index.js';
 import type { Memory } from './memory.js';
 
 export interface SearchOptions {
   limit?: number;
   includeProposed?: boolean;
   includeArchived?: boolean;
+  type?: MemoryType;
+  tag?: string;
+  minScore?: number;
 }
 
 export interface SearchHit {
@@ -112,9 +116,12 @@ export function search(memories: Memory[], query: string, opts: SearchOptions = 
   const matchers = tokens.map(buildMatcher);
   const hits: SearchHit[] = [];
 
+  const now = Date.now();
   for (const m of memories) {
     if (m.status === 'archived' && !opts.includeArchived) continue;
     if (m.status === 'proposed' && !opts.includeProposed) continue;
+    if (opts.type && m.type !== opts.type) continue;
+    if (opts.tag && !m.tags.some((t) => t.toLowerCase() === opts.tag!.toLowerCase())) continue;
 
     const title = m.title.toLowerCase();
     const tags = m.tags.join(' ').toLowerCase();
@@ -147,8 +154,21 @@ export function search(memories: Memory[], query: string, opts: SearchOptions = 
     if (matched === 0) continue;
     if (tokens.length > 1) score += (matched / tokens.length) * 5;
     if (m.verification === 'verified') score += 0.5;
+
+    // Recency bonus: recent memories are slightly more relevant
+    try {
+      const dateStr = m.updated || m.created;
+      const ageDays = (now - new Date(dateStr).getTime()) / (1000 * 60 * 60 * 24);
+      if (ageDays <= 14) score += 0.2;
+      else if (ageDays <= 30) score += 0.1;
+    } catch {
+      // ignore invalid dates
+    }
+
     score *= STATUS_WEIGHT[m.status];
-    hits.push({ memory: m, score: Math.round(score * 100) / 100, excerpt: excerptFor(m.body, tokens) });
+    const finalScore = Math.round(score * 100) / 100;
+    if (opts.minScore && finalScore < opts.minScore) continue;
+    hits.push({ memory: m, score: finalScore, excerpt: excerptFor(m.body, tokens) });
   }
   hits.sort((a, b) => b.score - a.score || a.memory.id.localeCompare(b.memory.id));
   return hits.slice(0, opts.limit ?? 5);

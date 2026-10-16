@@ -3,7 +3,8 @@ import { Command, InvalidArgumentError } from 'commander';
 import { runDoctor } from '../core/doctor.js';
 import { initProject } from '../core/init.js';
 import { rebuildIndex } from '../core/index-builder.js';
-import { approve, archive, checkpoint, context, log, map, propose, remember, status, undo } from '../core/service.js';
+import { approve, approveAll, archive, archiveAll, checkpoint, context, getProposals, log, map, propose, remember, status, undo } from '../core/service.js';
+import { seed } from '../core/seed.js';
 import { requireInitialized } from '../core/project.js';
 import { serveStdio } from '../mcp/server.js';
 import { MEMORY_TYPES, type MemoryType } from '../schemas/index.js';
@@ -44,8 +45,13 @@ program
 program
   .command('status')
   .description('Show memory counts, index health, agent integration and Recall-only Git changes')
-  .action(() => {
+  .option('--json', 'output status as JSON')
+  .action((o: { json?: boolean }) => {
     const s = status(cwd());
+    if (o.json) {
+      print(JSON.stringify(s, null, 2));
+      return;
+    }
     print(`Project root: ${s.project.root}`);
     print('Initialized: yes');
     const fmt = (o: Record<string, number>): string => (Object.entries(o).map(([k, v]) => `${k}=${v}`).join(' ') || 'none');
@@ -54,6 +60,14 @@ program
     if (s.problems) print(`Malformed memory files: ${s.problems} (run \`recall doctor\`)`);
     print(`Index: ${s.index}${s.index === 'up_to_date' ? '' : ' (run `recall rebuild`)'}`);
     print(`Agent file ${s.agentFile}: ${s.agent}`);
+
+    if (s.tokens) {
+      print(`Orientation footprint: ~${s.tokens.totalTokens.toLocaleString()} tokens (budget: ${s.tokens.budgetTokens.toLocaleString()} max)`);
+      for (const [file, tok] of Object.entries(s.tokens.files)) {
+        if (tok > 0) print(`  - ${file.padEnd(18)} ~${tok.toLocaleString()} tokens`);
+      }
+    }
+
     if (!s.git.available) print('Git: not installed');
     else if (!s.git.isRepo) print('Git: not a repository (no change tracking)');
     else if (!s.git.changes || s.git.changes.length === 0) print('Recall changes (uncommitted): none');
@@ -119,11 +133,19 @@ program
   .argument('<task>', 'task description')
   .option('-n, --limit <n>', 'max results', parseLimit, 5)
   .option('--format <format>', 'text|json', 'text')
+  .option('--type <type>', `filter by memory type (${MEMORY_TYPES.join('|')})`, parseType)
+  .option('--tag <tag>', 'filter by tag')
   .option('--include-proposed', 'include unapproved proposals')
   .option('--include-archived', 'include archived memories')
-  .action((task: string, o: { limit: number; format: string; includeProposed?: boolean; includeArchived?: boolean }) => {
+  .action((task: string, o: { limit: number; format: string; type?: MemoryType; tag?: string; includeProposed?: boolean; includeArchived?: boolean }) => {
     if (o.format !== 'text' && o.format !== 'json') throw new RecallError('--format must be text or json.');
-    const hits = context(cwd(), task, { limit: o.limit, includeProposed: !!o.includeProposed, includeArchived: !!o.includeArchived });
+    const hits = context(cwd(), task, {
+      limit: o.limit,
+      type: o.type,
+      tag: o.tag,
+      includeProposed: !!o.includeProposed,
+      includeArchived: !!o.includeArchived,
+    });
     if (o.format === 'json') {
       print(JSON.stringify(hits.map((h) => ({
         id: h.memory.id, title: h.memory.title, type: h.memory.type, status: h.memory.status,
@@ -141,6 +163,78 @@ program
       if (h.excerpt) print(`   ${h.excerpt}`);
     });
     print('\nVerify stored assumptions against current code before relying on them.');
+  });
+
+program
+  .command('seed')
+  .description('Analyze git history and documentation to propose initial architectural memories')
+  .option('--from <source>', 'git|docs|all', 'all')
+  .option('-n, --limit <n>', 'max items to propose', parseLimit, 5)
+  .option('--dry-run', 'preview proposed memories without saving to disk')
+  .action((o: { from: string; limit: number; dryRun?: boolean }) => {
+    if (o.from !== 'git' && o.from !== 'docs' && o.from !== 'all') {
+      throw new RecallError('--from must be git, docs, or all.');
+    }
+    const res = seed(cwd(), { from: o.from as 'git' | 'docs' | 'all', limit: o.limit, dryRun: o.dryRun });
+    if (res.proposed.length === 0) {
+      print(`No candidates found to seed from ${res.sourcesUsed.join(', ') || o.from}.`);
+      return;
+    }
+    if (res.dryRun) {
+      print(`[Dry Run] Found ${res.proposed.length} candidate(s) to seed:`);
+      for (const p of res.proposed) {
+        print(`  - [${p.type}] ${p.title} (source: ${p.source})`);
+      }
+      print('\nRun without --dry-run to propose them.');
+    } else {
+      print(`Seeded ${res.proposed.length} proposed memor${res.proposed.length === 1 ? 'y' : 'ies'}:`);
+      for (const p of res.proposed) {
+        print(`  - ${p.id}: ${p.title} [${p.type}] (source: ${p.source})`);
+      }
+      print('\nRun `recall review` or `recall approve <id>` to activate them.');
+    }
+  });
+
+program
+  .command('review')
+  .description('Review proposed memories and approve or archive them in batch')
+  .option('--approve-all', 'approve all currently proposed memories')
+  .option('--archive-all', 'archive all currently proposed memories')
+  .action((o: { approveAll?: boolean; archiveAll?: boolean }) => {
+    if (o.approveAll) {
+      const approved = approveAll(cwd());
+      if (approved.length === 0) {
+        print('No proposed memories to approve.');
+      } else {
+        print(`Approved ${approved.length} memor${approved.length === 1 ? 'y' : 'ies'}:`);
+        for (const m of approved) print(`  - ${m.id}: ${m.title}`);
+      }
+      return;
+    }
+    if (o.archiveAll) {
+      const archived = archiveAll(cwd());
+      if (archived.length === 0) {
+        print('No proposed memories to archive.');
+      } else {
+        print(`Archived ${archived.length} memor${archived.length === 1 ? 'y' : 'ies'}:`);
+        for (const m of archived) print(`  - ${m.id}: ${m.title}`);
+      }
+      return;
+    }
+    const proposals = getProposals(cwd());
+    if (proposals.length === 0) {
+      print('No pending proposed memories. Memory is up to date.');
+      return;
+    }
+    print(`Found ${proposals.length} pending proposed memor${proposals.length === 1 ? 'y' : 'ies'}:`);
+    for (const m of proposals) {
+      print(`  ${m.id} [${m.type}] ${m.title}`);
+      print(`    file: .recall/${m.file}`);
+      if (m.tags.length > 0) print(`    tags: ${m.tags.join(', ')}`);
+    }
+    print('\nTo approve all: recall review --approve-all');
+    print('To approve one: recall approve <id>');
+    print('To archive one: recall archive <id>');
   });
 
 program
