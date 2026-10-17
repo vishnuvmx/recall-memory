@@ -165,7 +165,7 @@ Running `recall init` creates:
   lessons/                # Lessons learned and documented failed approaches
   tasks/                  # Task definitions and status
   sessions/
-    session-log.md        # Durable append-only history of session checkpoints
+    session-log.md        # Rolling 14-day history of session checkpoints (auto-pruned as log grows)
   logs/
     CHANGELOG.md          # Local memory operation log
 ```
@@ -182,7 +182,8 @@ Memory files are Markdown with validated YAML frontmatter (`id, title, type, cre
 | `recall seed [--from git\|docs\|all] [-n N] [--dry-run]`              | Automatically mines Git commit history and documentation (`docs/`) into proposed architectural memories. Solves the cold-start problem.                   |
 | `recall review [--approve-all] [--archive-all]`                      | Lists pending proposed memories and allows batch activation or archiving.                                                                                  |
 | `recall map`                                                         | Re-scans the repository (respecting `.gitignore`) up to depth 3. Regenerates `PROJECT_MAP.md` and file line landmarks.                                     |
-| `recall checkpoint <summary> [-n next]`                              | Records an iteration snapshot into `CURRENT_STATE.md`, detects Git-modified files, and auto-refreshes landmarks.                                           |
+| `recall checkpoint [summary] [--auto] [-n next]`                     | Records an iteration snapshot into `CURRENT_STATE.md`, streams history to `session-log.md` (rolling 14-day retention), and auto-refreshes landmarks.        |
+| `recall prune [--days D] [--max N]`                                  | Prunes entries in `session-log.md` older than the retention window (default: 14 days) or exceeding max entries (default: 50).                               |
 | `recall remember <text> [-t title] [--type T] [--tag X]… [--active]` | Saves exact text as a memory note (`proposed` by default; pass `--active` for immediate active status). Rejects secret-looking content.                    |
 | `recall propose <text> -t title [--type T]`                          | Saves memory with status `proposed`. Excluded from search until promoted by a human.                                                                       |
 | `recall approve <id>`                                                | Promotes a `proposed` memory to `active`, indexing it for future retrieval.                                                                                |
@@ -276,7 +277,8 @@ Unsupported file types are still mapped in the directory tree; symbol landmarkin
 
 | Document           | Target Footprint    | Guardrail                                                                                  |
 | :----------------- | :------------------ | :----------------------------------------------------------------------------------------- |
-| `CURRENT_STATE.md` | ~200–300 tokens     | Capped single snapshot. History streams to `session-log.md`.                               |
+| `CURRENT_STATE.md` | ~200–300 tokens     | Capped single snapshot. History streams to `session-log.md` (rolling 14-day window).      |
+| `session-log.md`   | Rolling window      | Auto-pruned beyond 14 days or 50 entries to keep disk and context lean.                     |
 | `PROJECT_MAP.md`   | ~1,500–1,700 tokens | Priority truncation protects landmarks first. Hard ceiling of 5,600 chars (~1,500 tokens). |
 | `MEMORY.md`        | ~300–500 tokens     | Human-curated invariants only. Recommended < 4 KB.                                         |
 | `AGENTS.md` block  | ~400–450 tokens     | Recommended < 4 KB.                                                                        |

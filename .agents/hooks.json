@@ -1,0 +1,11 @@
+{
+  "recall-session-checkpoint": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./dist/cli/index.js checkpoint --auto || bun ./dist/cli/index.js checkpoint --auto || true",
+        "timeout": 15
+      }
+    ]
+  }
+}

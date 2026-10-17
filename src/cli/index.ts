@@ -3,7 +3,7 @@ import { Command, InvalidArgumentError } from 'commander';
 import { runDoctor } from '../core/doctor.js';
 import { initProject } from '../core/init.js';
 import { rebuildIndex } from '../core/index-builder.js';
-import { approve, approveAll, archive, archiveAll, checkpoint, context, getProposals, log, map, propose, remember, status, undo } from '../core/service.js';
+import { approve, approveAll, archive, archiveAll, checkpoint, context, getProposals, log, map, propose, prune, remember, status, undo } from '../core/service.js';
 import { seed } from '../core/seed.js';
 import { requireInitialized } from '../core/project.js';
 import { serveStdio } from '../mcp/server.js';
@@ -329,12 +329,15 @@ program
 program
   .command('checkpoint')
   .alias('session')
-  .description('Record an iteration checkpoint in .recall/CURRENT_STATE.md and the session log')
-  .argument('[summary]', 'summary of what was accomplished in this iteration', 'Task checkpoint')
+  .description('Record an iteration checkpoint in .recall/CURRENT_STATE.md and the session log (rolling 14-day history)')
+  .argument('[summary]', 'summary of what was accomplished in this iteration')
   .option('-n, --next <steps>', 'immediate next steps for following prompts (only if work remains half-done)')
   .option('--clear', 'clear active state and mark all previous work as completed')
-  .action((summary: string, o: { next?: string; clear?: boolean }) => {
-    const res = checkpoint(cwd(), summary, { nextSteps: o.next, clear: o.clear });
+  .option('--auto', 'auto-generate summary from git changes or chat activity')
+  .option('--retention <days>', 'retention window in days for session log history (default: 14)')
+  .action((summary: string | undefined, o: { next?: string; clear?: boolean; auto?: boolean; retention?: string }) => {
+    const retentionDays = o.retention ? parseInt(o.retention, 10) : undefined;
+    const res = checkpoint(cwd(), summary, { nextSteps: o.next, clear: o.clear, auto: o.auto, retentionDays });
     print(`Checkpoint recorded [${res.timestamp}]:`);
     print(`  Summary: ${res.summary}`);
     if (res.nextSteps) print(`  Next:    ${res.nextSteps}`);
@@ -343,7 +346,21 @@ program
       for (const f of res.modifiedFiles.slice(0, 5)) print(`    ${f}`);
       if (res.modifiedFiles.length > 5) print(`    ... (${res.modifiedFiles.length - 5} more)`);
     }
-    print('\nUpdated .recall/CURRENT_STATE.md and .recall/sessions/session-log.md.');
+    print('\nUpdated .recall/CURRENT_STATE.md and .recall/sessions/session-log.md (retaining last 14 days).');
+  });
+
+program
+  .command('prune')
+  .description('Prune session log entries older than retention window (default: 14 days)')
+  .option('-d, --days <days>', 'retention window in days (default: 14)', '14')
+  .option('-m, --max <count>', 'maximum number of session entries to retain (default: 50)', '50')
+  .action((o: { days: string; max: string }) => {
+    const days = parseInt(o.days, 10);
+    const max = parseInt(o.max, 10);
+    const res = prune(cwd(), { retentionDays: days, maxEntries: max });
+    print(`Session log pruned:`);
+    print(`  Removed:   ${res.removedCount} old entries`);
+    print(`  Remaining: ${res.remainingCount} entries within ${days}-day retention window.`);
   });
 
 

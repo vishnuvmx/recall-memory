@@ -32,14 +32,13 @@ const TOOLS = [
   },
   {
     name: 'recall_checkpoint',
-    description: 'Record an iteration snapshot into .recall/CURRENT_STATE.md and auto-refresh project landmarks.',
+    description: 'Record an iteration snapshot into .recall/CURRENT_STATE.md and session-log.md (rolling 14-day history).',
     inputSchema: {
       type: 'object',
       properties: {
-        summary: { type: 'string', description: '1-sentence summary of what was accomplished' },
+        summary: { type: 'string', description: '1-sentence summary of what was accomplished (optional; auto-detected if omitted)' },
         nextSteps: { type: 'string', description: 'Immediate next steps (only if multi-step plan is partially done)' },
       },
-      required: ['summary'],
     },
   },
   {
@@ -77,9 +76,9 @@ function callTool(cwd: string, name: string, args: Json): string {
     return `Proposed ${m.id} at ${m.file}. A human must run \`recall approve ${m.id}\`.`;
   }
   if (name === 'recall_checkpoint') {
-    const summary = String(args.summary ?? 'Checkpoint');
+    const summary = args.summary ? String(args.summary) : undefined;
     const nextSteps = args.nextSteps ? String(args.nextSteps) : undefined;
-    const res = checkpoint(cwd, summary, { nextSteps });
+    const res = checkpoint(cwd, summary, { nextSteps, auto: !args.summary });
     return `Checkpoint recorded [${res.timestamp}]: ${res.summary}${res.nextSteps ? ` (Next: ${res.nextSteps})` : ''}\nModified files: ${res.modifiedFiles.length > 0 ? res.modifiedFiles.join(', ') : 'clean'}`;
   }
   if (name === 'recall_map') {

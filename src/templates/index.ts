@@ -18,10 +18,11 @@ If you discovered an important architecture invariant or fixed a tricky bug:
 2. Do NOT attempt to mark memories active directly; proposed memories require human review (\`recall approve\`).
 3. Never store credentials, API keys, private keys, or secrets in memory.
 
-### End of Significant Tasks
-Before completing responses that modified code across files:
-1. Run \`recall checkpoint "<1-sentence summary of what YOU just did>"\`.
-2. Do NOT add \`--next\` unless the user explicitly requested a multi-step plan that remains half-done.`;
+### End of Session / AI Chat Checkpoint
+At the end of EVERY AI chat or task session:
+1. Run \`recall checkpoint "<1-sentence summary of what YOU just did>"\` (or call MCP \`recall_checkpoint\`).
+2. Do NOT add \`--next\` unless the user explicitly requested a multi-step plan that remains half-done.
+3. This maintains a rolling 14-day history in \`.recall/sessions/session-log.md\` (older entries beyond 14 days are automatically pruned as things grow).`;
 
 export const MEMORY_MD = `# Project Memory
 
@@ -54,7 +55,7 @@ trigger: always_on
 1. User Request Priority: The user's prompt is ALWAYS primary objective #1.
 2. Direct Execution: For routine commands, builds, tests, or single-file edits, EXECUTE THEM DIRECTLY without reading memory files.
 3. Complex Architecture Tasks: Locate landmark lines via \`.recall/PROJECT_MAP.md\` or run \`recall context "<task>"\`.
-4. Wrap Up: Run \`recall checkpoint "<1-sentence summary>"\` before completing responses that modified code across files.
+4. Wrap Up: At the end of every AI chat / session, run \`recall checkpoint "<1-sentence summary>"\` (maintains rolling 14-day history).
 5. Learnings: Save discoveries via \`recall propose "<text>" -t "<title>"\` (never direct active writes).
 `;
 
@@ -74,5 +75,5 @@ This project uses Recall for persistent Git-versioned memory in \`.recall/\`.
 
 ## Recording State
 1. Propose decisions/lessons: \`recall propose "<text>" -t "<title>" --type <decision|lesson|convention>\`.
-2. Wrap-up checkpoint: \`recall checkpoint "<summary>"\` (or call MCP \`recall_checkpoint\`).
+2. Wrap-up checkpoint: \`recall checkpoint "<summary>"\` at the end of every AI chat session (maintains rolling 14-day history).
 `;

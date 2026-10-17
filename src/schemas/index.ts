@@ -49,6 +49,8 @@ export const configSchema = z
     version: z.literal(1),
     agentFile: z.string().min(1).default('AGENTS.md'),
     profile: z.enum(PROFILE_TIERS).default('standard'),
+    retentionDays: z.number().int().positive().default(14),
+    maxLogEntries: z.number().int().positive().default(50),
   })
   .strict();
 export type RecallConfig = z.infer<typeof configSchema>;

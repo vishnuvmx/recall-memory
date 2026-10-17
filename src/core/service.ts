@@ -1,5 +1,5 @@
 import { agentState, type AgentState } from './agent.js';
-import { recordCheckpoint, type CheckpointOptions, type CheckpointResult } from './checkpoint.js';
+import { recordCheckpoint, pruneSessions, type CheckpointOptions, type CheckpointResult } from './checkpoint.js';
 import { loadConfig } from './config.js';
 import { gitInfo, recallChanges, recallHistory, undoRecall, type Commit, type UndoResult } from './git.js';
 import { indexState, rebuildIndex, type IndexState } from './index-builder.js';
@@ -194,9 +194,14 @@ export function map(start: string, profile?: ProfileTier): string {
   return generateProjectMap(p.root, p.recallDir, profile);
 }
 
-export function checkpoint(start: string, summary: string, opts?: CheckpointOptions): CheckpointResult {
+export function checkpoint(start: string, summary?: string, opts?: CheckpointOptions): CheckpointResult {
   const p = requireInitialized(start);
   return recordCheckpoint(p.root, p.recallDir, summary, opts);
+}
+
+export function prune(start: string, opts?: { retentionDays?: number; maxEntries?: number }): { removedCount: number; remainingCount: number } {
+  const p = requireInitialized(start);
+  return pruneSessions(p.recallDir, opts);
 }
 
 export function undo(start: string, opts?: { dryRun?: boolean }): UndoResult {

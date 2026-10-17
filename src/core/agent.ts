@@ -118,7 +118,7 @@ export function buildAntigravityRule(recallDir?: string): string {
     '1. User Request Priority: The user\'s prompt is ALWAYS primary objective #1.',
     '2. Direct Execution: You ALREADY have the warm state above; execute requests directly with full awareness of recent changes.',
     '3. Complex Architecture Tasks: Locate landmark lines via `.recall/PROJECT_MAP.md` or run `recall context "<task>"`.',
-    '4. Wrap Up: Run `recall checkpoint "<1-sentence summary>"` before completing responses that modified code across files.',
+    '4. Wrap Up: At the end of every AI chat / session, run `recall checkpoint "<1-sentence summary>"` (maintains rolling 14-day history).',
     '5. Learnings: Save discoveries via `recall propose "<text>" -t "<title>"` (never direct active writes).'
   );
 
@@ -138,6 +138,7 @@ export function buildAntigravityRule(recallDir?: string): string {
  * Ensures Antigravity-native rule and skill files exist in .agents/
  * and keeps the always_on rule warm with current state and constraints,
  * preserving user-added rules outside the managed block.
+ * Also registers lifecycle hooks for auto-checkpointing on execution loop stop.
  */
 export function syncAntigravitySupport(root: string, recallDir?: string): void {
   try {
@@ -171,6 +172,27 @@ export function syncAntigravitySupport(root: string, recallDir?: string): void {
     if (!fs.existsSync(skillPath)) {
       atomicWrite(skillPath, ANTIGRAVITY_SKILL);
     }
+
+    // Configure Antigravity lifecycle hook for auto-checkpointing on Stop
+    const hooksPath = path.join(agentsDir, 'hooks.json');
+    let hooksData: Record<string, unknown> = {};
+    if (fs.existsSync(hooksPath)) {
+      try {
+        hooksData = JSON.parse(fs.readFileSync(hooksPath, 'utf8'));
+      } catch {
+        hooksData = {};
+      }
+    }
+    hooksData['recall-session-checkpoint'] = {
+      Stop: [
+        {
+          type: 'command',
+          command: 'node ./dist/cli/index.js checkpoint --auto || bun ./dist/cli/index.js checkpoint --auto || true',
+          timeout: 15,
+        },
+      ],
+    };
+    atomicWrite(hooksPath, `${JSON.stringify(hooksData, null, 2)}\n`);
   } catch {
     // Non-fatal if .agents cannot be created or is outside boundaries
   }
