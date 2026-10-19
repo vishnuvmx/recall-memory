@@ -1,7 +1,7 @@
 {
   "name": "@vishnuvmx/recall-memory",
   "version": "0.1.0",
-  "description": "Git-inspired, local-first persistent project memory for AI coding agents.",
+  "description": "Zero-maintenance, local-first persistent project memory for AI coding agents.",
   "type": "module",
   "license": "MIT",
   "bin": {

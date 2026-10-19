@@ -4,12 +4,12 @@
   <img src="recall.png" alt="Recall Logo" width="100" />
 </p>
 
-# Recall: Git-Friendly Project Memory for AI Coding Agents
+# Recall: Zero-Maintenance Project Memory for AI Coding Agents
 
-**Local-first, Git-friendly project memory for AI coding agents.**
+**Local-first, zero-maintenance project memory for AI coding agents.**
 
 Markdown-based decisions, conventions, and codebase topology — retrieved on demand.  
-Your agent does the reasoning; Recall does the remembering.
+Init once — your AI agent does the reading, learning, and checkpointing.
 
 <!-- Badges -->
 
@@ -19,7 +19,7 @@ Your agent does the reasoning; Recall does the remembering.
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Tests](https://img.shields.io/badge/tests-vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev)
 [![Local only](https://img.shields.io/badge/network-zero%20calls-success)](docs/SECURITY.md)
-[![Git Backed](https://img.shields.io/badge/storage-local%20Git%20markdown-orange?logo=git&logoColor=white)](docs/ARCHITECTURE.md)
+[![Storage](https://img.shields.io/badge/storage-local%20markdown-orange)](docs/ARCHITECTURE.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#-contributing)
 
 <br />
