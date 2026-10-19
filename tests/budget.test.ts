@@ -123,5 +123,12 @@ describe('token budget guardrails', () => {
     expect(hits.length).toBeGreaterThan(0);
     expect(hits[0]!.file).toBe('service.ts');
     expect(hits[0]!.line).toBe(1);
+
+    // Also resolves non-code files (configs, package.json, etc.)
+    fs.writeFileSync(path.join(root, 'package.json'), '{"name": "test"}');
+    const fileHits = whereIs(root, 'package.json');
+    expect(fileHits.length).toBeGreaterThan(0);
+    expect(fileHits[0]!.file).toBe('package.json');
+    expect(fileHits[0]!.kind).toBe('file');
   });
 });

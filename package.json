@@ -9,6 +9,12 @@
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/vishnuvmx/recall-memory.git"
@@ -22,7 +28,6 @@
     "agent",
     "memory",
     "coding-agents",
-    "git",
     "mcp",
     "antigravity",
     "claude-code",
@@ -46,7 +51,7 @@
     "prebench": "npm run build",
     "bench": "node scripts/benchmark.js",
     "prepare": "git config core.hooksPath .githooks || true",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
     "commander": "^12.1.0",
