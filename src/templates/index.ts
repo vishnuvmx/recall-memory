@@ -45,7 +45,7 @@ export const CHANGELOG_MD = '# Recall changelog\n\nLocal log of memory operation
  */
 export const SKILL_FRONTMATTER = `---
 name: recall
-description: Project memory lookups. Use when a task touches unfamiliar architecture, when locating a symbol in a large file, or when the user says continue/resume.
+description: Project memory lookups (context, where) and recording learnings.
 ---`;
 
 export const ANTIGRAVITY_SKILL_BODY = `# Recall

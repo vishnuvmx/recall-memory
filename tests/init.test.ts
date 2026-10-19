@@ -48,8 +48,9 @@ describe('init', () => {
       expect(fs.existsSync(path.join(root, '.recall', f))).toBe(true);
     }
     const agents1 = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
-    expect(fs.existsSync(path.join(root, '.agents', 'rules', 'recall.md'))).toBe(true);
+    expect(fs.existsSync(path.join(root, '.agents', 'rules', 'recall.md'))).toBe(false); // No duplicate always-on injection
     expect(fs.existsSync(path.join(root, '.agents', 'skills', 'recall', 'SKILL.md'))).toBe(true);
+    expect(fs.existsSync(path.join(root, '.agents', 'hooks.json'))).toBe(true);
     const b = initProject(root);
     expect(b.created).toEqual([]);
     expect(b.agent).toBe('unchanged');

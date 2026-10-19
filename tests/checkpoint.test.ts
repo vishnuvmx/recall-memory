@@ -57,23 +57,14 @@ describe('checkpoint', () => {
     expect(log2).toContain('Implemented user authentication with JWT'); // Preserved in history
     expect(log2).toContain('Added token refresh tests');
 
-    const antigravityRule = path.join(root, '.agents', 'rules', 'recall.md');
-    expect(fs.existsSync(antigravityRule)).toBe(true);
-    const ruleContent = fs.readFileSync(antigravityRule, 'utf8');
-    expect(ruleContent).toContain('Added token refresh tests');
-    expect(ruleContent).toContain('Deploy to staging');
-    expect(ruleContent).toContain('trigger: always_on');
-    expect(ruleContent).toContain('<!-- recall:begin -->');
-    expect(ruleContent).toContain('<!-- recall:end -->');
+    // Ensure AGENTS.md remains byte-stable across checkpoints to preserve provider prompt caches
+    const agentsFile = path.join(root, 'AGENTS.md');
+    const agentsContentBefore = fs.readFileSync(agentsFile, 'utf8');
 
-    // Add a custom human-written rule outside the managed block
-    fs.writeFileSync(antigravityRule, `${ruleContent}\n\n# Team Invariant\nAlways use strict TypeScript.\n`);
-
-    // Run a third checkpoint and ensure human rule is preserved
+    // Run a third checkpoint and ensure prompt cache is preserved (no agent-file mutations)
     recordCheckpoint(root, path.join(root, '.recall'), 'Fixed login crash');
-    const rule3 = fs.readFileSync(antigravityRule, 'utf8');
-    expect(rule3).toContain('Fixed login crash');
-    expect(rule3).toContain('# Team Invariant\nAlways use strict TypeScript.');
+    const agentsContentAfter = fs.readFileSync(agentsFile, 'utf8');
+    expect(agentsContentAfter).toBe(agentsContentBefore);
 
     // Ensure Antigravity hooks.json was created
     const hooksFile = path.join(root, '.agents', 'hooks.json');

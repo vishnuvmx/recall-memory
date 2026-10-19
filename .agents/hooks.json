@@ -3,7 +3,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "node ./dist/cli/index.js checkpoint --auto || bun ./dist/cli/index.js checkpoint --auto || true",
+        "command": "recall checkpoint --hook",
         "timeout": 15
       }
     ]

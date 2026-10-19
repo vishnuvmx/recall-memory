@@ -102,7 +102,7 @@ export function archive(start: string, id: string): Memory {
   return m;
 }
 
-export function context(start: string, query: string, opts: SearchOptions): SearchHit[] {
+export function context(start: string, query: string, opts: SearchOptions = {}): SearchHit[] {
   const p = requireInitialized(start);
   return search(loadAll(p.recallDir).memories, query, opts);
 }

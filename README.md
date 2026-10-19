@@ -60,48 +60,66 @@ Your agent does the reasoning; Recall does the remembering.
 ## 🎯 About
 
 > [!NOTE]
-> **Status: Alpha (v0.1.0)**. Recall's core CLI, local retrieval engine, and `.recall/` file schemas are functional and thoroughly tested. APIs and tooling integrations are evolving. We welcome feedback and contributions!
+> **Status: Alpha (v0.1.0)**. Recall gives AI coding agents persistent project memory in plain Markdown inside `.recall/`.
 
-AI coding agents forget everything between sessions and waste tokens re-scanning your repository. **Recall** gives them a persistent, reviewable memory that lives inside your repo as plain Markdown in `.recall/`.
+AI coding agents forget decisions between sessions and re-scan whole repositories. Recall gives them structured memory without the prompt bloat or Git-like ceremony.
 
-- **No network calls at runtime**, no telemetry, no LLM SDK, no vector database.
-- **Git provides history.** Every memory is a file you can diff, review, and revert.
-- **Agents stay in control of reasoning.** Recall only organizes and retrieves knowledge: decisions, conventions, line landmarks, and failed approaches.
-
-> [!TIP]
-> **Honest scope:** Recall shines on large files (>300 LOC), multi-month projects, and team code governance. On small repositories (<15 files) or routine single-file tasks, its advantage is modest or negligible.
+- **Init once, AI agents do the rest:** Run `recall init` once. Your agent automatically looks up architecture context when needed, records non-obvious learnings and bugfixes, and checkpoints sessions via hooks. Zero manual maintenance.
+- **Cache-stable & token-disciplined:** Always-on prompt footprint is under **~120 tokens** and byte-stable across sessions (preserving provider prompt caching). No prompt mutation, no mandatory turn-ending tool calls.
+- **No network calls, no vector DB:** Plain Markdown in `.recall/`, deterministic stem search (~0.2 ms), and local symbol landmark jumps (`recall where`).
 
 ---
 
-## 🌱 Cold Start & Seeding
- 
-To build meaningful memory from day one without manually typing out architectural records:
- 
-1. **Automated Seeding (`recall seed`):** Analyze your recent git commits and repository documentation (`docs/`) to auto-propose initial architectural decisions and bugfixes:
-   ```bash
-   recall seed               # mines git history and docs/ into proposed memories
-   recall seed --from docs   # only inspect documentation files
-   recall seed --dry-run     # preview what would be proposed without saving
-   ```
-2. **Review & Batch Approval (`recall review`):** Inspect the mined proposals and approve them in one step:
-   ```bash
-   recall review             # inspect pending proposed memories
-   recall review --approve-all   # activate all proposals to index them for search
-   ```
-3. **Iterative Accumulation:** As your team and agent encounter tricky bugfixes or reject approaches, record them (`recall remember "..." --type failed_approach` or `--type lesson`) to protect future turns.
+## 📊 Measured Token Footprint (`recall cost`)
+
+Never trust unmeasured claims about "token savings". Run `recall cost` in any Recall-enabled repo to inspect the exact footprint:
+
+```text
+Always-on (sent with every agent turn):
+  AGENTS.md (Recall block only)            ~   97 tok
+  skill name + description                 ~   18 tok
+  TOTAL                                    ~  115 tok
+
+MCP (only if configured):
+  MCP tool schemas (3 tools)               ~  184 tok  (only if `recall serve` is configured)
+
+On-demand (only when the agent asks):
+  skill body                               ~  282 tok  (loaded when the agent picks the skill)
+  `recall context` response                ~  400 tok  (hard cap)
+  .recall/CURRENT_STATE.md                 ~  186 tok  (read only for continue/resume)
+  .recall/PROJECT_MAP.md                   ~ 2191 tok  (for humans; agents use `recall where`)
+```
+
+- **Byte-stable always-on rules:** Recall never writes dynamic session state into your always-on prompt, protecting your provider's prompt cache.
+- **Pull, not push:** Agents never read `PROJECT_MAP.md` upfront; they call `recall where <name>` for targeted `file:line` rows (~50 tokens).
+- **Capped context responses:** `recall context` returns compact hits capped at ~400 tokens.
+
+---
+
+## 🚫 When NOT to use Recall
+
+Be realistic about whether your repository needs Recall:
+
+- **Small repos (<15 files):** Your agent can already fit all relevant source files in its context window. Recall adds overhead for zero gain.
+- **Single-file tasks or routine typo fixes:** Agents do not need to consult memory or search landmarks.
+- **One-off exploratory scripts:** If code is discarded in hours, persistent memory provides no ROI.
+
+**Where Recall actually pays off:**
+- Repositories with files >300 lines of code (targeted `recall where` jumps).
+- Non-obvious architectural invariants, API quirks, or rejected approaches that agents repeatedly get wrong across different chats.
+- Multi-developer teams aligning multiple AI agents (Cursor, Antigravity, Claude Code, Windsurf) to the same project conventions.
 
 ---
 
 ## ✨ Features
 
-- 🗂️ **Structured memory**: decisions, lessons, conventions, bugfixes, failed approaches, tasks, and design tokens.
-- 🔎 **Fast offline retrieval**: deterministic keyword search with suffix stemming and field weighting (~0.2 ms lookup, no vector database).
-- 🧭 **Codebase topology**: auto-generated `PROJECT_MAP.md` mapping directory layouts and symbol landmarks for files >300 LOC.
-- ✅ **Human-gated proposals**: agent MCP tool calls propose changes (`proposed`); humans approve them (`active`).
-- 🔌 **Native MCP server**: stdio server exposing context search, proposals, checkpointing, and mapping.
-- 🤝 **Broad agent support**: Antigravity, Claude Code, Cursor, Windsurf, Copilot, and custom agents.
-- 🛡️ **Safety guardrails**: best-effort secret regex scanning, non-destructive Git operations, and safe rollback via `recall undo`.
-- 💸 **Disciplined footprint**: orientation footprint typically constrained between 1,500–3,000 tokens.
+- ⚡ **Init Once, Zero Maintenance**: Run `recall init` once. Agents autonomously search context, record learnings, and checkpoint via hooks.
+- 🗂️ **Structured memory**: decisions, lessons, conventions, bugfixes, failed approaches, and design tokens.
+- 🔎 **Fast offline retrieval**: deterministic keyword search with suffix stemming, capped at ~400 tokens per lookup.
+- 🧭 **Targeted symbol jumps**: `recall where <symbol>` returns live cached `file:line` rows instead of reading a 2,000-token file map.
+- 🔄 **Autonomous de-duplication**: Repeated agent writes update existing memories in place rather than bloating future retrieval turns.
+- 🔌 **Ultra-lean MCP server**: 3 terse tools (`recall_context`, `recall_where`, `recall_remember`) keeping schema overhead under 190 tokens.
+- 🛡️ **Safety guardrails**: best-effort secret regex scanning and non-destructive Git rollbacks via `recall undo`.
 
 ---
 
@@ -178,23 +196,23 @@ Memory files are Markdown with validated YAML frontmatter (`id, title, type, cre
 
 | Command                                                              | What it does                                                                                                                                               |
 | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `recall init [--no-agent]`                                           | Scaffolds `.recall/`, maps the project, initializes state, and installs the anti-scan protocol in `AGENTS.md`. Preserves existing content outside markers. |
+| `recall init [--no-agent]`                                           | Scaffolds `.recall/`, maps the project, and installs lean, cache-stable agent instructions. One command; agents handle the rest.                           |
+| `recall cost [--json]`                                               | Inspects the exact token footprint of Recall in your repo: always-on instructions vs MCP schemas vs on-demand lookups.                                     |
+| `recall where <name> [-n N]`                                         | Fast symbol & file locator. Returns live cached `file:line` rows so agents jump straight to code without reading `PROJECT_MAP.md`.                         |
+| `recall remember <text> [-t title] [--type T] [--tag X]…`            | Saves a memory. Active immediately in default `auto` mode; similar titles update in place. Pass `--proposed` for review mode.                              |
+| `recall context <task> [-n N] [--verbose] [--format json]`           | Local keyword and stem search. Returns compact results hard-capped at ~400 tokens by default. Pass `--verbose` for human scores.                          |
 | `recall seed [--from git\|docs\|all] [-n N] [--dry-run]`              | Automatically mines Git commit history and documentation (`docs/`) into proposed architectural memories. Solves the cold-start problem.                   |
-| `recall review [--approve-all] [--archive-all]`                      | Lists pending proposed memories and allows batch activation or archiving.                                                                                  |
-| `recall map`                                                         | Re-scans the repository (respecting `.gitignore`) up to depth 3. Regenerates `PROJECT_MAP.md` and file line landmarks.                                     |
-| `recall checkpoint [summary] [--auto] [-n next]`                     | Records an iteration snapshot into `CURRENT_STATE.md`, streams history to `session-log.md` (rolling 14-day retention), and auto-refreshes landmarks.        |
-| `recall prune [--days D] [--max N]`                                  | Prunes entries in `session-log.md` older than the retention window (default: 14 days) or exceeding max entries (default: 50).                               |
-| `recall remember <text> [-t title] [--type T] [--tag X]… [--active]` | Saves exact text as a memory note (`proposed` by default; pass `--active` for immediate active status). Rejects secret-looking content.                    |
-| `recall propose <text> -t title [--type T]`                          | Saves memory with status `proposed`. Excluded from search until promoted by a human.                                                                       |
-| `recall approve <id>`                                                | Promotes a `proposed` memory to `active`, indexing it for future retrieval.                                                                                |
+| `recall review [--approve-all] [--archive-all]`                      | Optional audit command: inspects pending proposed memories and allows batch activation or archiving.                                                      |
+| `recall approve <id>`                                                | Promotes a `proposed` memory to `active` (only needed if running in gated `review` mode).                                                                   |
 | `recall archive <id>`                                                | Sets status to `archived`. Kept on disk for history but excluded from default search. Never deletes files.                                                 |
-| `recall context <task> [-n N] [--type T] [--tag X] [--format json]`  | Local keyword, tag, and suffix-stemmed search. Ranks title, tag, heading, body hits, and recency.                                                          |
-| `recall status [--json]`                                             | Displays memory counts, orientation token footprint against budget (~3,000 max), agent integration, and uncommitted changes.                              |
-| `recall log [-n N]`                                                  | Displays read-only Git history for `.recall/` (or falls back to local changelog).                                                                          |
+| `recall checkpoint [summary] [--auto] [--hook]`                      | Records an iteration snapshot. Run automatically by the agent `Stop` hook; manual invocation is optional.                                                 |
+| `recall prune [--days D] [--max N]`                                  | Prunes entries in `session-log.md` older than the retention window (default: 14 days) or exceeding max entries (default: 50).                               |
+| `recall status [--json]`                                             | Displays memory counts, index health, agent integration status, and uncommitted memory changes.                                                            |
+| `recall map`                                                         | Regenerates `PROJECT_MAP.md` directory layout and file line landmarks.                                                                                     |
 | `recall rebuild`                                                     | Deterministically rebuilds `INDEX.md`. Preserves user notes outside markers; reports malformed files without deleting them.                                |
 | `recall undo [--dry-run]`                                            | Safely discards uncommitted changes and removes untracked files in `.recall/`. Never touches gitignored files or project source code.                      |
 | `recall doctor`                                                      | Diagnoses configuration, directories, frontmatter, map, state, and Git tracking. Suggests fixes without destructive auto-repairs.                          |
-| `recall serve`                                                       | Local stdio MCP server exposing `recall_context`, `recall_propose`, `recall_checkpoint`, `recall_map`, and `recall_status`.                                |
+| `recall serve`                                                       | Ultra-lean stdio MCP server exposing `recall_context`, `recall_where`, and `recall_remember` (<190 tok schema overhead).                                  |
 
 **Memory types:** `fact | decision | convention | lesson | bugfix | failed_approach | task | design_system`  
 **Lifecycle:** `proposed | active | superseded | archived`  

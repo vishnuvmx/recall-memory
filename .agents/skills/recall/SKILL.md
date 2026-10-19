@@ -1,17 +1,25 @@
 ---
 name: recall
-description: Project memory, codebase topology, and orientation protocol for multi-file tasks. Activate when navigating large files, querying architectural decisions, or checkpointing sessions.
+description: Project memory lookups (context, where) and recording learnings.
 ---
 
-# Recall Agent Protocol
+<!-- recall:begin -->
+# Recall
 
-This project uses Recall for persistent Git-versioned memory in `.recall/`.
+Project memory lives in `.recall/` as Markdown. Use it to avoid re-discovering things, not as a ritual.
 
-## Orientation
-1. Do NOT crawl directories recursively. Read `.recall/PROJECT_MAP.md` to find entry points, theme tokens, and symbol landmarks.
-2. In files $\ge 300$ lines, use landmark lines as anchors ($\pm 50$ line window) to view target code directly.
-3. For architectural constraints: run `recall context "<task>"` or call MCP `recall_context`.
+## Look things up (pull, never push)
+- `recall context "<topic>"`: past decisions, conventions, and lessons. Output is capped (~400 tokens). Verify claims against current code.
+- `recall where <symbol-or-path>`: `file:line` locations from a cached symbol scan. Open only the lines you need.
+- Continuing earlier work: read `.recall/CURRENT_STATE.md`. It is history, not a to-do list.
 
-## Recording State
-1. Propose decisions/lessons: `recall propose "<text>" -t "<title>" --type <decision|lesson|convention>`.
-2. Wrap-up checkpoint: `recall checkpoint "<summary>"` (or call MCP `recall_checkpoint`).
+## Record what future sessions need
+- `recall remember "<text>" -t "<title>" --type <decision|convention|lesson|bugfix|failed_approach>`
+- Record only non-obvious knowledge: why a design was chosen, invariants, root causes, dead ends.
+- Re-recording a similar title updates the existing memory instead of duplicating it.
+- Never store secrets (writes containing them are rejected).
+
+## Don't
+- Don't read `.recall/` files wholesale or "orient" before simple tasks.
+- Don't run a checkpoint at the end of a session; a hook records it automatically.
+<!-- recall:end -->

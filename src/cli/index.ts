@@ -100,7 +100,7 @@ program
     const forced = o.active || o.approved ? 'active' : o.proposed ? 'proposed' : undefined;
     const r = agentRemember(cwd(), { title, text, type: o.type, tags: o.tag, sources: o.source, status: forced });
     const m = r.memory;
-    print(`${r.action === 'updated' ? 'Updated' : 'Saved'} ${m.id} (${m.type}, ${m.status}) -> .recall/${m.file}`);
+    print(`${r.action === 'updated' ? 'Updated' : 'Saved'} ${m.id} (${m.type}, ${m.status}, ${m.verification}) -> .recall/${m.file}`);
     if (m.status === 'proposed') print(`  Proposed: run \`recall approve ${m.id}\` to make it searchable.`);
   });
 

@@ -278,25 +278,26 @@ describe('doctor', () => {
 });
 
 describe('mcp', () => {
-  it('lists tools, searches, proposes, checkpoints, and returns status', () => {
+  it('lists lean tools, searches, remembers, where, and handles legacy unlisted calls', () => {
     const root = setup();
     remember(root, { title: 'Render pipeline', text: 'keep rendering pure' });
     const list = handleMessage(root, { jsonrpc: '2.0', id: 1, method: 'tools/list' }) as any;
     expect(list.result.tools.map((t: any) => t.name)).toEqual([
       'recall_context',
-      'recall_propose',
-      'recall_checkpoint',
-      'recall_map',
-      'recall_status',
+      'recall_where',
+      'recall_remember',
     ]);
     const res = handleMessage(root, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'recall_context', arguments: { query: 'render' } } }) as any;
     expect(res.result.content[0].text).toContain('Render pipeline');
-    const prop = handleMessage(root, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'recall_propose', arguments: { title: 'P', text: 'x' } } }) as any;
+    const rem = handleMessage(root, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'recall_remember', arguments: { title: 'P', text: 'x' } } }) as any;
+    expect(rem.result.content[0].text).toContain('Saved');
+    expect(loadAll(path.join(root, '.recall')).memories.at(-1)!.status).toBe('active');
+    // Legacy unlisted tools remain callable
+    const prop = handleMessage(root, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'recall_propose', arguments: { title: 'Legacy P', text: 'x' } } }) as any;
     expect(prop.result.content[0].text).toContain('Proposed');
-    expect(loadAll(path.join(root, '.recall')).memories.at(-1)!.status).toBe('proposed');
-    const chk = handleMessage(root, { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'recall_checkpoint', arguments: { summary: 'Done task' } } }) as any;
+    const chk = handleMessage(root, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'recall_checkpoint', arguments: { summary: 'Done task' } } }) as any;
     expect(chk.result.content[0].text).toContain('Checkpoint recorded');
-    const stat = handleMessage(root, { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'recall_status', arguments: {} } }) as any;
+    const stat = handleMessage(root, { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'recall_status', arguments: {} } }) as any;
     expect(stat.result.content[0].text).toContain('Recall Status');
     expect(handleMessage(root, { jsonrpc: '2.0', method: 'notifications/initialized' })).toBeNull();
   });
