@@ -17,7 +17,6 @@ Init once — your AI agent does the reading, learning, and checkpointing.
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
-[![Tests](https://img.shields.io/badge/tests-vitest-6E9F18?logo=vitest&logoColor=white)](https://vitest.dev)
 [![Local only](https://img.shields.io/badge/network-zero%20calls-success)](docs/SECURITY.md)
 [![Storage](https://img.shields.io/badge/storage-local%20markdown-orange)](docs/ARCHITECTURE.md)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#-contributing)
@@ -37,7 +36,6 @@ Init once — your AI agent does the reading, learning, and checkpointing.
 ## 📖 Table of Contents
 
 - [About](#-about)
-- [Cold Start & Seeding](#-cold-start--seeding)
 - [Features](#-features)
 - [Installation](#-installation)
 - [Quick Start](#-quick-start)
@@ -127,7 +125,7 @@ Be realistic about whether your repository needs Recall:
 
 **Requirements:** Node.js ≥ 20 and Git (recommended).
 
-### From npm (available from the 22 Oct launch)
+### From npm
 
 ```bash
 npm install -g @vishnuvmx/recall-memory   # exposes the `recall` command
@@ -201,7 +199,7 @@ Memory files are Markdown with validated YAML frontmatter (`id, title, type, cre
 | `recall where <name> [-n N]`                                         | Fast symbol & file locator. Returns live cached `file:line` rows so agents jump straight to code without reading `PROJECT_MAP.md`.                         |
 | `recall remember <text> [-t title] [--type T] [--tag X]…`            | Saves a memory. Active immediately in default `auto` mode; similar titles update in place. Pass `--proposed` for review mode.                              |
 | `recall context <task> [-n N] [--verbose] [--format json]`           | Local keyword and stem search. Returns compact results hard-capped at ~400 tokens by default. Pass `--verbose` for human scores.                          |
-| `recall seed [--from git\|docs\|all] [-n N] [--dry-run]`              | Automatically mines Git commit history and documentation (`docs/`) into proposed architectural memories. Solves the cold-start problem.                   |
+| `recall seed [--from git\|docs\|all] [-n N] [--dry-run]`              | Automatically mines Git commit history and documentation (`docs/`) into proposed architectural memories.                                                  |
 | `recall review [--approve-all] [--archive-all]`                      | Optional audit command: inspects pending proposed memories and allows batch activation or archiving.                                                      |
 | `recall approve <id>`                                                | Promotes a `proposed` memory to `active` (only needed if running in gated `review` mode).                                                                   |
 | `recall archive <id>`                                                | Sets status to `archived`. Kept on disk for history but excluded from default search. Never deletes files.                                                 |
@@ -311,7 +309,7 @@ Unsupported file types are still mapped in the directory tree; symbol landmarkin
 2. **Silent sequential ID collisions across branches:** Memory IDs increment sequentially (`mem_001`, `mem_002`, etc.). Because filenames include title slugs (e.g. `mem_015-auth.md` vs `mem_015-cache.md`), Git sees two distinct files and will merge them without conflict. The collision is silent until `recall doctor` or `recall status` reports a duplicate ID, requiring manual renumbering of one file.
 3. **Local vs. shared state:** `CURRENT_STATE.md` and `sessions/` are local to your machine and branch. They do not sync across teammates or fresh clones.
 4. **Proposal gate bypass with shell access:** The stdio MCP interface strictly uses `recall_propose` (`proposed`), and `RECALL_AGENT=1` forces `proposed` status across operations. However, any agent operating with direct shell access can pass `--active` or write Markdown files directly to disk. Human code review on Pull Requests remains the primary line of defense.
-5. **No automated seeding command:** `recall init` scaffolds an empty memory structure. Extracting initial decisions from existing ADRs or commit history is a manual prompting exercise rather than a built-in automated command.
+5. **Cold start memory extraction:** `recall init` scaffolds an empty structure. Bootstrapping decisions from Git history or docs requires running `recall seed` or manually authoring records.
 
 ---
 
@@ -332,7 +330,6 @@ Unsupported file types are still mapped in the directory tree; symbol landmarkin
 npm install          # install dependencies
 npm run build        # compile TypeScript to dist/
 npm run typecheck    # type-check without emitting
-npm test             # run the Vitest suite
 npm run bench        # run benchmarks
 ```
 
@@ -346,17 +343,17 @@ src/
   schemas/     # Zod schemas for frontmatter and config
   templates/   # Scaffolding templates for `recall init`
   utils/       # Shared helpers
-tests/         # Vitest test suite
 docs/          # Architecture, benchmarks, security specifications
 scripts/       # Benchmark scripts
 ```
 
-**Tech stack:** TypeScript (ESM), [Commander](https://github.com/tj/commander.js), [gray-matter](https://github.com/jonschlinkert/gray-matter), [Zod](https://zod.dev), [Vitest](https://vitest.dev).
+**Tech stack:** TypeScript (ESM), [Commander](https://github.com/tj/commander.js), [gray-matter](https://github.com/jonschlinkert/gray-matter), [Zod](https://zod.dev).
 
 ---
 
 ## 📚 Documentation
 
+- [Documentation Overview](docs/README.md): summary of specifications, benchmarks, and threat models.
 - [Architecture & Technical Specification](docs/ARCHITECTURE.md): orientation loop, landmark protocol, competitor matrix, retrieval mechanics.
 - [Empirical Benchmarks & Token Experiments](docs/BENCHMARKS.md): hardware benchmarks, 80k-LOC metrics, token orientation model.
 - [Security & Governance Model](docs/SECURITY.md): threat model, memory-poisoning defense, secret scanning, CODEOWNERS governance.
@@ -367,12 +364,9 @@ scripts/       # Benchmark scripts
 
 Contributions are welcome!
 
-1. Fork the repository and create a feature branch: `git checkout -b feat/my-change`
-2. Make your changes and add tests under `tests/`.
-3. Ensure `npm run typecheck` and `npm test` pass.
-4. Commit with a clear message and open a Pull Request describing the change and motivation.
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, development guidelines, and pull request procedures. All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
-Please open an issue first for large changes or new features. Never include credentials or secrets in memory files or commits.
+Please open an issue first for large changes or architectural proposals. Never include credentials or secrets in memory files or commits.
 
 ---
 

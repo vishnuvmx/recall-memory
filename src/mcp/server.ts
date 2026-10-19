@@ -8,7 +8,7 @@ import { MEMORY_TYPES, type MemoryType } from '../schemas/index.js';
  * Minimal MCP server over stdio (newline-delimited JSON-RPC 2.0), no SDK dependency.
  *
  * TOKEN BUDGET: every listed tool schema is sent to the model on every turn, so the list is kept to
- * three terse tools (enforced by tests/budget.test.ts). Bookkeeping (checkpoints, map refresh, status)
+ * three terse tools. Bookkeeping (checkpoints, map refresh, status)
  * is NOT exposed to the model; those run from hooks/CLI. Legacy tool names stay callable, unlisted.
  */
 export const TOOLS = [

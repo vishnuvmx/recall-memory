@@ -162,7 +162,7 @@ recall undo --dry-run
 recall undo
 ```
 
-**Safety Guarantees:**
+**Safety Safeguards:**
 * **Confined to `.recall/`**: Never touches workspace source code outside `.recall/`.
 * **Gitignored Protection**: Files listed in `.gitignore` (such as local `CURRENT_STATE.md`) are never touched by `git clean`.
 * **Index Coherence**: Automatically rebuilds `INDEX.md` after restoring tracked files.

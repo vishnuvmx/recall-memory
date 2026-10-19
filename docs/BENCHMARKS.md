@@ -24,7 +24,7 @@ Measurements were conducted across three local codebases:
 | Metric | Target 1: `recall` (CLI Tool) | Target 2: `edita` (Mobile App) | Target 3: `edita.tools` (Web App) |
 | :--- | :--- | :--- | :--- |
 | **Domain** | Systems / Developer Tooling CLI | Production Document & Presentation App | Next.js / React Web Application |
-| **Tech Stack** | TypeScript, Node.js, Vitest | Flutter (Dart), Android (Kotlin / Java) | TypeScript, Next.js, React, Tailwind |
+| **Tech Stack** | TypeScript, Node.js | Flutter (Dart), Android (Kotlin / Java) | TypeScript, Next.js, React, Tailwind |
 | **Tracked Source Files** | 24 source files | **226 source files** | **124 source files** |
 | **Lines of Code (LOC)** | 3,420 lines | **80,709 lines** | **18,450 lines** |
 | **Subdirectories** | 8 directories | **65 nested directories** | **22 nested directories** |

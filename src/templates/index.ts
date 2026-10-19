@@ -2,7 +2,7 @@
  * Always-on instruction installed into the agent file (AGENTS.md by default).
  *
  * TOKEN BUDGET: this text is injected into EVERY agent turn, so it is capped at
- * ~120 tokens and enforced by tests/budget.test.ts. It must also be STATIC
+ * ~120 tokens. It must also be STATIC
  * (never embed dynamic state): changing always-on text invalidates provider
  * prompt caches and silently multiplies cost. Detail belongs in the on-demand
  * skill (ANTIGRAVITY_SKILL_BODY), not here.
