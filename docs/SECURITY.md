@@ -41,27 +41,32 @@ Recall implements a defense-in-depth model combining local validation, gatekeepi
                              │
                              ▼
 ┌──────────────────────────────────────────────────────────┐
-│                 2. The Proposal Gate                     │
-│  • MCP & agent proposals land with `status: proposed`    │
-│  • Strictly excluded from retrieval until human approves │
+│          2. Write Policy: Auto vs. Review Gate           │
+│  • writes: "auto" (default): immediate active memory     │
+│    with in-place near-duplicate rewriting & compaction   │
+│  • writes: "review": proposals hold as `status: proposed`│
+│    excluded from retrieval until human approves          │
 └────────────────────────────┬─────────────────────────────┘
                              │
                              ▼
 ┌──────────────────────────────────────────────────────────┐
 │              3. Git Code Review & CODEOWNERS             │
 │  • Plain markdown visible in `git diff`                  │
-│  • Mandatory team-lead approval on `.recall/`            │
+│  • Optional team-lead approval on `.recall/`             │
 └──────────────────────────────────────────────────────────┘
 ```
 
-### Control 1: The Proposal Gate (`recall_propose` & `recall approve`)
-* **Invariant**: The stdio MCP server exposes `recall_propose` for agent writes, but does **not** expose direct approval.
-* **Retrieval Isolation**: Memories created via `recall propose` or `recall_propose` are tagged with `status: proposed`.
-* **Execution**: `recall context` strictly excludes `proposed` memories from search results. An agent cannot retrieve, rely upon, or execute its own unverified proposals until a human engineer explicitly runs:
+### Control 1: Configurable Write Governance (`writes: "auto" | "review"`)
+Recall balances agent autonomy with team security requirements via `.recall/config.json`:
+
+* **Autonomous Mode (`writes: "auto"`, default)**:
+  Coding agents autonomously record discovered lessons, conventions, and architectural decisions using `recall remember` or the `recall_remember` MCP tool. To prevent memory inflation, Recall automatically checks for near-duplicate records and updates existing entries in place.
+* **Review Gate Mode (`writes: "review"`)**:
+  For high-security repositories, teams can switch to review mode. In this mode, memories land as `status: proposed`. `recall context` strictly excludes `proposed` memories from search results until a human engineer verifies and approves them via:
   ```bash
   recall approve <id>
   ```
-  *(Verified in unit test: `tests/core.test.ts > context search > approves proposed memories and makes them searchable`)*
+* **Proposal & Approval Tools**: Both `recall propose` / `recall_propose` (for explicitly proposing changes) and `recall approve` remain fully available across modes.
 
 ### Control 2: Best-Effort Secret Detection
 Before writing any memory file to disk, Recall runs regex pattern validation (`assertNoSecrets`). It rejects:

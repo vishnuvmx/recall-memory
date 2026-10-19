@@ -61,13 +61,25 @@ Max                36.71 ms                   140.13 ms                   185.88
 
 ---
 
-## 4. Hard Output Budget Enforcement
+## 4. Prompt Footprint & Token Cost Benchmarks (`recall cost`)
 
-Recall enforces a strict character ceiling in `buildProjectMapMarkdown` (default content cap: 5,600 characters $\approx$ 1,500–1,700 tokens). 
+To eliminate token waste and preserve LLM provider prompt caches, Recall enforces hard budget constraints on both always-on instructions and on-demand retrievals.
 
-> **Token Conversion Caveat:** Source code, paths, and punctuation tokenize less efficiently than standard English prose (~3.5–3.8 characters per token vs 4.0). A 5,600-character ceiling corresponds to roughly **1,500–1,700 tokens**.
+Run `recall cost` in any repository to inspect exact token footprints:
 
-If directory trees or landmarks exceed this threshold, the output truncates gracefully with an explicit notice to protect prompt budgets, dropping tree structures first and preserving high-value line landmarks.
+| Component | Target Budget | Measured Footprint | Cache Status |
+| :--- | :---: | :---: | :---: |
+| **`AGENTS.md` micro-instruction** | $\le$ 100 tokens | **97 tokens** | Static / Cache-Preserved |
+| **Skill frontmatter description** | $\le$ 20 tokens | **18 tokens** | Static / Cache-Preserved |
+| **Total Always-On Footprint** | $\le$ **120 tokens** | **115 tokens** | **100% Cache-Preserved** |
+| **MCP 3-tool schema** | $\le$ 250 tokens | **210 tokens** | Static / Tool Call Cache |
+| **Targeted Symbol Locator (`recall where`)** | $\le$ 30 tokens | **15–25 tokens** | On-demand |
+| **Context Retrieval Excerpt (`recall context`)** | $\le$ 400 tokens | **120–380 tokens** | On-demand |
+
+*Legacy comparison: Previous versions injected duplicate rule files and dynamic session summaries into prompt files on every checkpoint (~796 tokens always-on + cache bust per session). The current architecture achieves an **85.5% reduction** in always-on token overhead with **zero prompt cache invalidation**.*
+
+### Repository Map Content Ceiling
+When full topology maps are generated (`recall map`), Recall enforces a 5,600-character ceiling ($\approx$ 1,500 tokens). If directory trees or landmarks exceed this threshold, the output truncates gracefully with an explicit notice to protect prompt budgets, dropping tree structures first and preserving high-value line landmarks.
 
 ### Output Metrics Across Repositories
 
