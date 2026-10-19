@@ -44,6 +44,9 @@ export const PROFILE_BUDGETS: Record<ProfileTier, number> = {
   frontier: 45000,
 };
 
+export const WRITE_MODES = ['auto', 'review'] as const;
+export type WriteMode = (typeof WRITE_MODES)[number];
+
 export const configSchema = z
   .object({
     version: z.literal(1),
@@ -51,6 +54,8 @@ export const configSchema = z
     profile: z.enum(PROFILE_TIERS).default('standard'),
     retentionDays: z.number().int().positive().default(14),
     maxLogEntries: z.number().int().positive().default(50),
+    /** `auto`: agent memory writes are active immediately. `review`: they land as `proposed` for human approval. */
+    writes: z.enum(WRITE_MODES).default('auto'),
   })
   .strict();
 export type RecallConfig = z.infer<typeof configSchema>;

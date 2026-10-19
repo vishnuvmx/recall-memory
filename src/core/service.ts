@@ -4,10 +4,11 @@ import { loadConfig } from './config.js';
 import { gitInfo, recallChanges, recallHistory, undoRecall, type Commit, type UndoResult } from './git.js';
 import { indexState, rebuildIndex, type IndexState } from './index-builder.js';
 import { generateProjectMap } from './mapper.js';
-import { appendChangelog, createMemory, loadAll, updateMemory, type Memory, type NewMemory } from './memory.js';
+import { appendChangelog, createMemory, loadAll, rewriteMemory, updateMemory, type Memory, type NewMemory } from './memory.js';
 import { requireInitialized, type Project } from './project.js';
-import { search, type SearchHit, type SearchOptions } from './retrieval.js';
-import { PROFILE_BUDGETS, type ProfileTier } from '../schemas/index.js';
+import { search, tokenize, type SearchHit, type SearchOptions } from './retrieval.js';
+import { where, type WhereHit } from './where.js';
+import { PROFILE_BUDGETS, type ProfileTier, type WriteMode } from '../schemas/index.js';
 import fs from 'node:fs';
 import { resolveInside } from '../utils/fs.js';
 
@@ -23,6 +24,66 @@ export function remember(start: string, input: NewMemory, action = 'remember'): 
 /** Agent-facing: always lands as `proposed` and is excluded from search until approved. */
 export function propose(start: string, input: NewMemory): Memory {
   return remember(start, { ...input, status: 'proposed' }, 'propose');
+}
+
+const normTitle = (t: string): string => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/** Same normalized title, or high word overlap (Jaccard >= 0.7 over >= 2 words each). */
+export function findDuplicate(candidates: Memory[], title: string): Memory | undefined {
+  const n = normTitle(title);
+  const exact = candidates.find((m) => normTitle(m.title) === n);
+  if (exact) return exact;
+  const a = new Set(tokenize(title));
+  if (a.size < 2) return undefined;
+  let best: { m: Memory; j: number } | undefined;
+  for (const m of candidates) {
+    const b = new Set(tokenize(m.title));
+    if (b.size < 2) continue;
+    const inter = [...a].filter((t) => b.has(t)).length;
+    const j = inter / (a.size + b.size - inter);
+    if (j >= 0.7 && (!best || j > best.j)) best = { m, j };
+  }
+  return best?.m;
+}
+
+export interface RememberResult {
+  memory: Memory;
+  action: 'created' | 'updated';
+}
+
+/**
+ * The write path for agents (CLI `remember` and MCP `recall_remember`).
+ * - `writes: auto` (default): active immediately, so memory is useful without human ceremony.
+ * - `writes: review` or RECALL_AGENT=1: lands as `proposed`.
+ * A near-duplicate title updates the existing memory instead of adding another file, which keeps
+ * retrieval results (and their token cost) from growing with repetition.
+ */
+export function agentRemember(start: string, input: NewMemory): RememberResult {
+  const p = requireInitialized(start);
+  let mode: WriteMode = 'auto';
+  try {
+    mode = loadConfig(p.recallDir).writes;
+  } catch {
+    /* surfaced by `recall doctor` */
+  }
+  const status = input.status ?? (mode === 'review' || process.env.RECALL_AGENT === '1' ? 'proposed' : 'active');
+  const type = input.type ?? 'fact';
+  // In review mode never silently rewrite an approved memory; only merge into other proposals.
+  const candidates = loadAll(p.recallDir).memories.filter(
+    (m) => m.type === type && (status === 'active' ? m.status === 'active' || m.status === 'proposed' : m.status === 'proposed'),
+  );
+  const dup = findDuplicate(candidates, input.title);
+  const memory = dup
+    ? rewriteMemory(p.recallDir, dup.id, { ...input, type, status })
+    : createMemory(p.recallDir, { ...input, type, status });
+  appendChangelog(p.recallDir, dup ? 'update' : 'remember', memory);
+  rebuildIndex(p.recallDir);
+  return { memory, action: dup ? 'updated' : 'created' };
+}
+
+export function whereIs(start: string, query: string, limit?: number): WhereHit[] {
+  const p = requireInitialized(start);
+  return where(p.root, p.recallDir, query, limit);
 }
 
 export function approve(start: string, id: string): Memory {

@@ -173,3 +173,26 @@ export function search(memories: Memory[], query: string, opts: SearchOptions = 
   hits.sort((a, b) => b.score - a.score || a.memory.id.localeCompare(b.memory.id));
   return hits.slice(0, opts.limit ?? 5);
 }
+
+/** Default cap for agent-facing context output: ~400 tokens at ~4 chars/token. */
+export const CONTEXT_MAX_CHARS = 1600;
+
+/**
+ * Agent-facing rendering: one header line + one excerpt line per hit, hard-capped.
+ * Hits scoring under 30% of the best are dropped: they cost tokens and rarely help.
+ */
+export function formatHitsCompact(hits: SearchHit[], maxChars = CONTEXT_MAX_CHARS): string {
+  if (hits.length === 0) return 'No relevant memory.';
+  const top = hits[0]!.score;
+  const out: string[] = [];
+  let used = 0;
+  for (const h of hits) {
+    if (h.score < top * 0.3) break;
+    const flag = h.memory.status === 'active' ? '' : `, ${h.memory.status}`;
+    const entry = `- ${h.memory.title} [${h.memory.type}${flag}] .recall/${h.memory.file}${h.excerpt ? `\n  ${h.excerpt}` : ''}`;
+    if (out.length > 0 && used + entry.length + 1 > maxChars) break;
+    out.push(entry.length > maxChars ? `${entry.slice(0, maxChars - 3)}...` : entry);
+    used += entry.length + 1;
+  }
+  return out.join('\n');
+}

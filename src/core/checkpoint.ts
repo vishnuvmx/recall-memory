@@ -1,9 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { syncAntigravitySupport } from './agent.js';
 import { loadConfig } from './config.js';
 import { repoChanges } from './git.js';
-import { generateProjectMap } from './mapper.js';
 import { atomicWrite, resolveInside, today } from '../utils/fs.js';
 
 export interface CheckpointOptions {
@@ -19,6 +17,8 @@ export interface CheckpointResult {
   summary: string;
   nextSteps?: string;
   modifiedFiles: string[];
+  /** True when an auto checkpoint was skipped because nothing changed since the last one. */
+  skipped?: boolean;
 }
 
 export interface SessionLogEntry {
@@ -220,6 +220,20 @@ export function recordCheckpoint(
 
   const timestamp = getCurrentTimestamp();
 
+  const sessionLogDir = path.join(recallDir, 'sessions');
+  const logFile = path.join(sessionLogDir, 'session-log.md');
+  const existingRaw = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+
+  // The Stop hook fires after every agent turn; don't log a new entry when nothing changed.
+  if (opts.auto && !opts.clear) {
+    const last = parseSessionLogEntries(existingRaw).at(-1);
+    const lastFiles = last?.modifiedFiles ?? [];
+    const same = lastFiles.length === modifiedFiles.length && lastFiles.every((f, i) => f === modifiedFiles[i]);
+    if (last && same && last.summary.startsWith('Session ')) {
+      return { timestamp: last.timestamp, summary: last.summary, modifiedFiles, skipped: true };
+    }
+  }
+
   const result: CheckpointResult = {
     timestamp,
     summary: cleanSummary,
@@ -230,9 +244,7 @@ export function recordCheckpoint(
   const currentStateFile = resolveInside(recallDir, 'CURRENT_STATE.md');
   atomicWrite(currentStateFile, buildCurrentStateMarkdown(result));
 
-  const sessionLogDir = path.join(recallDir, 'sessions');
   fs.mkdirSync(sessionLogDir, { recursive: true });
-  const logFile = path.join(sessionLogDir, 'session-log.md');
 
   const entryLines: string[] = [
     `### [${timestamp}] Checkpoint`,
@@ -258,25 +270,13 @@ export function recordCheckpoint(
   if (opts.retentionDays !== undefined) retentionDays = opts.retentionDays;
   if (opts.maxEntries !== undefined) maxEntries = opts.maxEntries;
 
-  const existingLog = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8').trimEnd() : '# Session Log';
+  const existingLog = existingRaw ? existingRaw.trimEnd() : '# Session Log';
   const combinedLog = `${existingLog}\n\n${logEntry}`;
   const pruned = pruneSessionLog(combinedLog, { retentionDays, maxEntries });
   atomicWrite(logFile, pruned.content);
 
-  // Automatically refresh project map and landmarks so line numbers never stay stale
-  try {
-    generateProjectMap(root, recallDir);
-  } catch {
-    // Non-fatal if project map regeneration encounters an error
-  }
-
-  // Keep Antigravity always_on rule warm with the latest checkpoint state
-  try {
-    syncAntigravitySupport(root, recallDir);
-  } catch {
-    // Non-fatal if Antigravity sync encounters an error
-  }
-
+  // Deliberately no agent-file or project-map rewrites here: checkpoints run from a hook after every
+  // session, and mutating always-on agent instructions would invalidate provider prompt caches.
   return result;
 }
 

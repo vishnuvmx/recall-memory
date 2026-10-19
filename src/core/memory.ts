@@ -203,6 +203,30 @@ export function updateMemory(recallDir: string, id: string, patch: Patch): Memor
   return { ...next, body: m.body, file: m.file };
 }
 
+/**
+ * Replace a memory's text in place (same id and file). Latest knowledge wins so memory stays small;
+ * tags and sources are merged. Git history keeps the previous wording.
+ */
+export function rewriteMemory(recallDir: string, id: string, input: NewMemory): Memory {
+  const m = findMemory(recallDir, id);
+  const title = input.title.trim() || m.title;
+  const text = input.text.trim();
+  if (!text) throw new RecallError('A memory needs non-empty text.');
+  assertNoSecrets(`${title}\n${text}`);
+  const next: MemoryMeta = memoryMetaSchema.parse({
+    ...m,
+    title,
+    updated: today(),
+    tags: [...new Set([...m.tags, ...(input.tags ?? []).map((t) => t.trim()).filter(Boolean)])],
+    sources: [...new Set([...m.sources, ...(input.sources ?? [])])],
+    status: input.status ?? m.status,
+    verification: 'unverified',
+  });
+  const body = text.startsWith('#') ? text : `# ${title}\n\n${text}`;
+  atomicWrite(resolveInside(recallDir, ...m.file.split('/')), serialize(next, body));
+  return { ...next, body, file: m.file };
+}
+
 export function appendChangelog(recallDir: string, action: string, m: { id: string; title: string }): void {
   const file = resolveInside(recallDir, 'logs', 'CHANGELOG.md');
   const line = `- ${today()} ${action} ${m.id} "${m.title.replace(/\s+/g, ' ')}"\n`;

@@ -8,7 +8,7 @@ export function configPath(recallDir: string): string {
 }
 
 export function defaultConfig(): RecallConfig {
-  return { version: 1, agentFile: 'AGENTS.md', profile: 'standard', retentionDays: 14, maxLogEntries: 50 };
+  return { version: 1, agentFile: 'AGENTS.md', profile: 'standard', retentionDays: 14, maxLogEntries: 50, writes: 'auto' };
 }
 
 export function loadConfig(recallDir: string): RecallConfig {

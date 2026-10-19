@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { Command, InvalidArgumentError } from 'commander';
+import { costReport } from '../core/cost.js';
 import { runDoctor } from '../core/doctor.js';
 import { initProject } from '../core/init.js';
 import { rebuildIndex } from '../core/index-builder.js';
-import { approve, approveAll, archive, archiveAll, checkpoint, context, getProposals, log, map, propose, prune, remember, status, undo } from '../core/service.js';
+import { formatHitsCompact } from '../core/retrieval.js';
+import { agentRemember, approve, approveAll, archive, archiveAll, checkpoint, context, getProposals, log, map, propose, prune, status, undo, whereIs } from '../core/service.js';
 import { seed } from '../core/seed.js';
 import { requireInitialized } from '../core/project.js';
+import { formatWhere } from '../core/where.js';
 import { serveStdio } from '../mcp/server.js';
 import { MEMORY_TYPES, PROFILE_TIERS, type MemoryType, type ProfileTier } from '../schemas/index.js';
 import { RecallError } from '../utils/fs.js';
@@ -41,9 +44,9 @@ program
     for (const f of r.created) print(`  created  ${f}`);
     for (const f of r.skipped) print(`  kept     ${f}`);
     print(`Agent instructions: ${r.agent}`);
-    print('\nNothing was staged or committed. Review with `git status`, then commit when ready.');
-    print('Activate: your agent must read the instruction file (default AGENTS.md). If it does not, point it at');
-    print('.recall/MEMORY.md manually or use `recall serve` as an MCP server. See README.');
+    print('\nDone. Agents now look things up and record learnings on their own; no further commands needed.');
+    print('Run `recall cost` to see exactly what Recall adds to your agent context.');
+    print('Nothing was staged or committed. Review with `git status`, then commit when ready.');
   });
 
 program
@@ -66,8 +69,7 @@ program
     print(`Agent file ${s.agentFile}: ${s.agent}`);
 
     if (s.tokens) {
-      print(`Model profile: ${s.profile} (orientation budget: ~${s.tokens.budgetTokens.toLocaleString()} tokens)`);
-      print(`Orientation footprint: ~${s.tokens.totalTokens.toLocaleString()} tokens`);
+      print('On-demand files (never loaded unless explicitly read; see `recall cost` for always-on cost):');
       for (const [file, tok] of Object.entries(s.tokens.files)) {
         if (tok > 0) print(`  - ${file.padEnd(18)} ~${tok.toLocaleString()} tokens`);
       }
@@ -84,22 +86,22 @@ program
 
 program
   .command('remember')
-  .description('Save explicit text as a memory note (default: proposed until approved or --active passed)')
+  .description('Save a memory. Active immediately when config `writes` is "auto" (default); similar titles update in place')
   .argument('<text>', 'the memory text')
   .option('-t, --title <title>', 'title (defaults to the first line of the text)')
   .option('--type <type>', `one of ${MEMORY_TYPES.join('|')}`, parseType, 'fact' as MemoryType)
   .option('--tag <tag>', 'tag (repeatable)', collect, [] as string[])
   .option('--source <ref>', 'source reference, e.g. a file path or URL (repeatable)', collect, [] as string[])
-  .option('--active', 'save directly as active (explicit human approval flag)')
+  .option('--active', 'force active status regardless of write mode')
   .option('--approved', 'alias for --active')
-  .action((text: string, o: { title?: string; type: MemoryType; tag: string[]; source: string[]; active?: boolean; approved?: boolean }) => {
+  .option('--proposed', 'force proposed status (needs `recall approve`)')
+  .action((text: string, o: { title?: string; type: MemoryType; tag: string[]; source: string[]; active?: boolean; approved?: boolean; proposed?: boolean }) => {
     const title = o.title ?? (text.split('\n')[0] ?? '').slice(0, 80);
-    const status = (o.active || o.approved) ? 'active' : 'proposed';
-    const m = remember(cwd(), { title, text, type: o.type, tags: o.tag, sources: o.source, status });
-    print(`Saved ${m.id} (${m.type}, ${m.status}, ${m.verification}) -> .recall/${m.file}`);
-    if (m.status === 'proposed') {
-      print(`  Note: Saved as proposed (default-deny gate). Run \`recall approve ${m.id}\` to index it for search.`);
-    }
+    const forced = o.active || o.approved ? 'active' : o.proposed ? 'proposed' : undefined;
+    const r = agentRemember(cwd(), { title, text, type: o.type, tags: o.tag, sources: o.source, status: forced });
+    const m = r.memory;
+    print(`${r.action === 'updated' ? 'Updated' : 'Saved'} ${m.id} (${m.type}, ${m.status}) -> .recall/${m.file}`);
+    if (m.status === 'proposed') print(`  Proposed: run \`recall approve ${m.id}\` to make it searchable.`);
   });
 
 program
@@ -134,15 +136,16 @@ program
 
 program
   .command('context')
-  .description('Retrieve relevant memories by deterministic keyword search (not semantic search)')
+  .description('Retrieve relevant memories by deterministic keyword search (compact, capped at ~400 tokens)')
   .argument('<task>', 'task description')
   .option('-n, --limit <n>', 'max results', parseLimit, 5)
   .option('--format <format>', 'text|json', 'text')
+  .option('--verbose', 'show scores and status details (for humans; not capped)')
   .option('--type <type>', `filter by memory type (${MEMORY_TYPES.join('|')})`, parseType)
   .option('--tag <tag>', 'filter by tag')
   .option('--include-proposed', 'include unapproved proposals')
   .option('--include-archived', 'include archived memories')
-  .action((task: string, o: { limit: number; format: string; type?: MemoryType; tag?: string; includeProposed?: boolean; includeArchived?: boolean }) => {
+  .action((task: string, o: { limit: number; format: string; verbose?: boolean; type?: MemoryType; tag?: string; includeProposed?: boolean; includeArchived?: boolean }) => {
     if (o.format !== 'text' && o.format !== 'json') throw new RecallError('--format must be text or json.');
     const hits = context(cwd(), task, {
       limit: o.limit,
@@ -158,6 +161,10 @@ program
       })), null, 2));
       return;
     }
+    if (!o.verbose) {
+      print(formatHitsCompact(hits));
+      return;
+    }
     if (hits.length === 0) {
       print('No relevant memory found (keyword match on titles, tags, headings and body).');
       return;
@@ -167,7 +174,42 @@ program
       print(`   .recall/${h.memory.file}`);
       if (h.excerpt) print(`   ${h.excerpt}`);
     });
-    print('\nVerify stored assumptions against current code before relying on them.');
+  });
+
+program
+  .command('where')
+  .description('Find a symbol or file and print file:line rows (live, cached scan; cheaper than reading PROJECT_MAP.md)')
+  .argument('<name>', 'symbol name, partial name, or path fragment')
+  .option('-n, --limit <n>', 'max results', parseLimit, 15)
+  .action((name: string, o: { limit: number }) => {
+    print(formatWhere(whereIs(cwd(), name, o.limit)));
+  });
+
+program
+  .command('cost')
+  .description('Show what Recall adds to your agent context: always-on vs on-demand tokens (estimates)')
+  .option('--json', 'output as JSON')
+  .action((o: { json?: boolean }) => {
+    const r = costReport(cwd());
+    if (o.json) {
+      print(JSON.stringify(r, null, 2));
+      return;
+    }
+    const row = (l: { source: string; tokens: number; note?: string }): void =>
+      print(`  ${l.source.padEnd(40)} ~${String(l.tokens).padStart(5)} tok${l.note ? `  (${l.note})` : ''}`);
+    print('Always-on (sent with every agent turn):');
+    r.alwaysOn.forEach(row);
+    print(`  ${'TOTAL'.padEnd(40)} ~${String(r.alwaysOnTotal).padStart(5)} tok`);
+    print('\nMCP (only if configured):');
+    row(r.mcp);
+    print('\nOn-demand (only when the agent asks):');
+    r.onDemand.forEach(row);
+    print('\nEstimates use ~4 characters per token.');
+    if (r.warnings.length > 0) {
+      print('\nWarnings:');
+      for (const w of r.warnings) print(`  ! ${w}`);
+      process.exitCode = 1;
+    }
   });
 
 program
@@ -323,21 +365,35 @@ program
     }
     const file = map(cwd(), o.profile as ProfileTier | undefined);
     print(`Project map generated: ${file}`);
-    print('AI agents can read this file directly instead of running exploratory list_dir scans or crawling raw code.');
+    print('Agents should prefer `recall where <name>` (a few lines) over reading the whole map.');
   });
 
 program
   .command('checkpoint')
   .alias('session')
-  .description('Record an iteration checkpoint in .recall/CURRENT_STATE.md and the session log (rolling 14-day history)')
+  .description('Record an iteration checkpoint in .recall/CURRENT_STATE.md and the session log (normally run by the agent Stop hook)')
   .argument('[summary]', 'summary of what was accomplished in this iteration')
   .option('-n, --next <steps>', 'immediate next steps for following prompts (only if work remains half-done)')
   .option('--clear', 'clear active state and mark all previous work as completed')
-  .option('--auto', 'auto-generate summary from git changes or chat activity')
+  .option('--auto', 'auto-generate summary from git changes; skipped when nothing changed')
+  .option('--hook', 'agent lifecycle hook mode: auto checkpoint, print `{}` (hook JSON), never fail')
   .option('--retention <days>', 'retention window in days for session log history (default: 14)')
-  .action((summary: string | undefined, o: { next?: string; clear?: boolean; auto?: boolean; retention?: string }) => {
+  .action((summary: string | undefined, o: { next?: string; clear?: boolean; auto?: boolean; hook?: boolean; retention?: string }) => {
+    if (o.hook) {
+      try {
+        checkpoint(cwd(), undefined, { auto: true });
+      } catch {
+        // A memory bookkeeping failure must never block or break the agent loop.
+      }
+      print('{}');
+      return;
+    }
     const retentionDays = o.retention ? parseInt(o.retention, 10) : undefined;
     const res = checkpoint(cwd(), summary, { nextSteps: o.next, clear: o.clear, auto: o.auto, retentionDays });
+    if (res.skipped) {
+      print('No changes since the last checkpoint; nothing recorded.');
+      return;
+    }
     print(`Checkpoint recorded [${res.timestamp}]:`);
     print(`  Summary: ${res.summary}`);
     if (res.nextSteps) print(`  Next:    ${res.nextSteps}`);
@@ -346,7 +402,6 @@ program
       for (const f of res.modifiedFiles.slice(0, 5)) print(`    ${f}`);
       if (res.modifiedFiles.length > 5) print(`    ... (${res.modifiedFiles.length - 5} more)`);
     }
-    print('\nUpdated .recall/CURRENT_STATE.md and .recall/sessions/session-log.md (retaining last 14 days).');
   });
 
 program
@@ -366,7 +421,7 @@ program
 
 program
   .command('serve')
-  .description('Run a local MCP server over stdio exposing recall_context and recall_propose')
+  .description('Run a local MCP server over stdio exposing recall_context, recall_where and recall_remember')
   .action(() => {
     requireInitialized(cwd());
     serveStdio(cwd());

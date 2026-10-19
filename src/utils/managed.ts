@@ -28,3 +28,16 @@ export function extractManagedBlock(existing: string, name = 'recall'): string |
   if (b === -1 || e === -1 || e < b) return null;
   return existing.slice(b + begin.length, e).trim();
 }
+
+/** Remove a marker-delimited block (and its markers), preserving everything else. No-op if absent. */
+export function removeManagedBlock(existing: string, name = 'recall'): string {
+  const begin = `<!-- ${name}:begin -->`;
+  const end = `<!-- ${name}:end -->`;
+  const b = existing.indexOf(begin);
+  const e = existing.indexOf(end);
+  if (b === -1 || e === -1 || e < b) return existing;
+  const before = existing.slice(0, b).replace(/\s*$/, '');
+  const after = existing.slice(e + end.length).replace(/^\s*/, '');
+  if (!before) return after;
+  return after ? `${before}\n\n${after}` : `${before}\n`;
+}
