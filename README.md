@@ -255,14 +255,17 @@ If `AGENTS.md` already exists, any instructions outside those boundaries are str
 
 ---
 
-## 🔍 How Retrieval Works Without Embeddings
+## 🔍 How Hybrid Retrieval Works
 
-Recall avoids vector databases and remote embedding APIs by combining deterministic indexing with local linguistic normalization:
+Recall combines deterministic indexing, full-text BM25 search, and dense semantic embeddings with zero external network calls:
 
-1. **Tokenization & stopwords:** strips punctuation, normalizes case, filters common English stopwords.
-2. **Suffix stemming:** words with common suffixes (`-ing`, `-ed`, `-s`, `-es`, `-ies`) match root forms (query `"scale"` matches `"scaling"`; `"token"` matches `"tokens"`).
-3. **Field weighting:** exact title (15 pts) > partial title (8) > tag match (2) > heading match (2) > body occurrence (1 each, max 3).
-4. **Lifecycle & verification boosts:** active memories get full score; verified memories get +0.5; proposed and superseded are discounted; archived are excluded by default.
+1. **Exact-Match Technical Identifier Boost**: Code identifiers (camelCase, PascalCase, snake_case), error codes (`ERR_...`, `SQLITE_...`, `EEXIST`), filenames (`*.ts`, `Dockerfile`), and CLI commands receive high priority boost (+12 to +20).
+2. **BM25 Keyword Matching**: Full-text indexing using SQLite FTS5 with Porter stemming and BM25 ranking across titles, tags, and document bodies.
+3. **Dense Vector Semantic Similarity**: Local deterministic subword embedding generation (`recall-dense-v1`) with cosine similarity, bridging vocabulary mismatch without external cloud APIs.
+4. **Recency Weighting & Confidence Gating**: Exponential decay favoring fresh memories while weighting by confidence scores and verification status. Outdated or expired facts are automatically filtered out.
+5. **Multi-Tenant & Workspace Isolation**: Queries strictly enforce `tenantId` and `workspaceId` boundaries, preventing cross-project memory leakage.
+6. **Token-Budget Cap**: Search outputs are strictly capped at ~400 tokens / 1,600 characters to prevent context dilution.
+
 
 ---
 
@@ -330,6 +333,7 @@ Unsupported file types are still mapped in the directory tree; symbol landmarkin
 npm install          # install dependencies
 npm run build        # compile TypeScript to dist/
 npm run typecheck    # type-check without emitting
+npm test             # run comprehensive security, concurrency, & retrieval tests
 npm run bench        # run benchmarks
 ```
 
@@ -338,14 +342,17 @@ npm run bench        # run benchmarks
 ```text
 src/
   cli/         # Commander-based CLI entry (recall ...)
-  core/        # Memory store, search, map, git, checkpoint logic
-  mcp/         # Stdio MCP server
-  schemas/     # Zod schemas for frontmatter and config
+  core/        # SQLite store, hybrid retrieval, conflict resolution, memory store
+  security/    # Prompt poisoning detection, entropy/secret scanning, isolation, auth
+  mcp/         # Stdio MCP server with authentication & access control
+  schemas/     # Zod schemas for metadata, lifecycle, and config
+  tests/       # Automated test suite (security, concurrency, consistency)
   templates/   # Scaffolding templates for `recall init`
-  utils/       # Shared helpers
+  utils/       # Redacting logger and filesystem helpers
 docs/          # Architecture, benchmarks, security specifications
 scripts/       # Benchmark scripts
 ```
+
 
 **Tech stack:** TypeScript (ESM), [Commander](https://github.com/tj/commander.js), [gray-matter](https://github.com/jonschlinkert/gray-matter), [Zod](https://zod.dev).
 

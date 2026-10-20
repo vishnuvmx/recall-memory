@@ -127,26 +127,52 @@ With this policy, PRs contain only intentional architectural changes, never nois
 
 ---
 
-## 7. Retrieval Mechanics: Explainability vs. Vocabulary Mismatch
+## 7. Hybrid Retrieval & Concurrency Architecture
 
-Recall uses tokenized keyword matching with suffix stemming (e.g., `stem("indexing")` $\to$ `"index"`). Matches are weighted by location:
-* Exact title match: +15
-* Title substring match: +8
-* Title token match: +3 (stemmed: +2)
-* Tag match: +2 (stemmed: +1.5)
-* Section heading match: +2 (stemmed: +1.5)
-* Body match: +1 per occurrence up to 3 (stemmed: +1)
+Recall implements a high-performance **Hybrid Retrieval Engine** combining:
+1. **Exact-Match Identifier Priority**: Identifiers (camelCase, PascalCase, snake_case), error codes (`ERR_...`, `SQLITE_...`, `EEXIST`), filenames (`*.ts`, `Dockerfile`), commands (`npm run ...`), and config keys receive high priority boost (+12 to +20).
+2. **BM25 Keyword Matching**: Full-text indexing using SQLite FTS5 with Porter stemming and token BM25 ranking.
+3. **Dense Vector Semantic Similarity**: Local deterministic subword embedding generation (`recall-dense-v1`) with cosine similarity, bridging vocabulary mismatch without external network calls.
+4. **Recency Weighting & Confidence Gating**: Exponential decay favoring fresh memories while weighting by confidence scores and verification status.
+
+```
+                    ┌──────────────────────────────────────┐
+                    │          Query / Task Prompt         │
+                    └──────────────────┬───────────────────┘
+                                       │
+        ┌──────────────────────────────┼──────────────────────────────┐
+        ▼                              ▼                              ▼
+┌───────────────┐              ┌───────────────┐              ┌───────────────┐
+│  Exact Match  │              │   BM25 FTS5   │              │ Dense Vector  │
+│ (IDs & Files) │              │ (Full Text)   │              │ (Cosine Sim)  │
+└───────┬───────┘              └───────┬───────┘              └───────┬───────┘
+        │                              │                              │
+        └──────────────────────────────┼──────────────────────────────┘
+                                       │
+                                       ▼
+                       ┌───────────────────────────────┐
+                       │   Composite Score & Recency   │
+                       │    (Confidence Multiplier)    │
+                       └───────────────┬───────────────┘
+                                       │
+                                       ▼
+                       ┌───────────────────────────────┐
+                       │    Deduplicated Output Cap    │
+                       │   (Strict Budget ≤ 400 tok)   │
+                       └───────────────────────────────┘
+```
+
+### SQLite WAL & Serialized Concurrency
+Alongside Git-tracked Markdown source files, Recall maintains an embedded SQLite database (`.recall/.cache/recall.db`):
+- **WAL Mode**: `PRAGMA journal_mode = WAL;` enables concurrent read operations without blocking writes.
+- **Lock Handling**: Configured with `busy_timeout = 5000` and exponential backoff retry.
+- **Write Serialization**: In-process `AsyncWriteQueue` prevents transaction interleaving.
+- **Read-After-Write Consistency**: Immediate synchronous transaction commits guarantee newly written memories are available to subsequent queries.
+- **Embedding Cache**: SHA-256 content hashing reuses embeddings when text is unchanged and handles model version upgrades cleanly.
 
 ### Compact Output Budget
 Agent retrieval responses format hits into concise bulleted highlights (`formatHitsCompact()`), hard-capped at **~400 tokens**. Full markdown documents are read only when deeper historical context is explicitly requested.
 
-### The Trade-off
-* **Explainability**: Every result is predictable and debuggable. Run `recall context "<task>" --format json` to see the exact scoring breakdown.
-* **Vocabulary Mismatch**: Keyword matching does not understand synonyms. If a document discusses *"OAuth token refresh"* without the word *"login"*, an agent querying *"login logic"* will receive 0 matches.
-
-### Mitigation Strategies:
-1. **Tags**: Memory authors and agents include common synonyms in frontmatter `tags: [auth, login, session, oauth]`.
-2. **Fallback Protocol**: If `recall context` returns no matches, agents broaden query terms or fall back to targeted live file grepping.
 
 ---
 

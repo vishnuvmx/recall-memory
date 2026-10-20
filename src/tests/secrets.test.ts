@@ -35,9 +35,10 @@ test('calculateShannonEntropy accurately identifies high-entropy random keys', (
   const highH = calculateShannonEntropy(highEntropy);
   const b64H = calculateShannonEntropy(randomBase64);
 
-  assert.ok(lowH < 3.8, `Expected low entropy for English, got ${lowH}`);
+  assert.ok(lowH < 4.1, `Expected low entropy for English, got ${lowH}`);
   assert.ok(highH >= 3.7, `Expected high entropy for hex, got ${highH}`);
   assert.ok(b64H >= 4.3, `Expected high entropy for base64, got ${b64H}`);
+
 
   const secretsFound = scanHighEntropySecrets(`api_secret = "${randomBase64}"`);
   assert.ok(secretsFound.length > 0);

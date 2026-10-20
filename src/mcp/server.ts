@@ -115,8 +115,9 @@ export function handleMessage(cwd: string, msg: Json): Json | null {
   // Authenticate request token & origin if auth is enabled
   const params = (msg.params ?? {}) as Json;
   const meta = (params._meta ?? {}) as Json;
-  const token = (params.token ?? meta.token ?? process.env.RECALL_AUTH_TOKEN) as string | undefined;
+  const token = (params.token ?? meta.token) as string | undefined;
   const origin = (params.origin ?? meta.origin ?? process.env.RECALL_CLIENT_ORIGIN) as string | undefined;
+
 
   const auth = authenticateRequest(token, origin);
   if (!auth.authenticated) {

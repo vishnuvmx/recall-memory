@@ -47,10 +47,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/tests/**/*.test.js",
     "prebench": "npm run build",
     "bench": "node scripts/benchmark.js",
     "prepare": "git config core.hooksPath .githooks || true",
-    "prepublishOnly": "npm run typecheck && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run test"
+
   },
   "dependencies": {
     "commander": "^12.1.0",

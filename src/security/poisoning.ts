@@ -16,8 +16,9 @@ const INJECTION_PATTERNS: Array<{ reason: string; weight: number; regex: RegExp 
   {
     reason: 'Instruction override directive (ignore previous/prior/above)',
     weight: 0.9,
-    regex: /\b(?:ignore|disregard|forget|override|bypass)\b\s+(?:all\s+)?(?:previous|prior|above|system|existing)\s+(?:instructions?|directives?|rules?|prompts?|constraints?)/i,
+    regex: /\b(?:ignore|disregard|forget|override|bypass)\b\s+(?:(?:all|the)\s+)?(?:(?:previous|prior|above|system|existing|earlier)\s+)*(?:instructions?|directives?|rules?|prompts?|constraints?)/i,
   },
+
   {
     reason: 'Role manipulation / system persona hijack',
     weight: 0.85,
