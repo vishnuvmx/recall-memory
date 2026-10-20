@@ -13,7 +13,7 @@ Init once — your AI agent does the reading, learning, and checkpointing.
 
 <!-- Badges -->
 
-[![Status: Alpha](https://img.shields.io/badge/status-alpha%20(v0.1.0)-orange.svg)](#-about)
+[![Status: Alpha](https://img.shields.io/badge/status-alpha%20(v0.2.0)-orange.svg)](#-about)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
@@ -42,7 +42,7 @@ Init once — your AI agent does the reading, learning, and checkpointing.
 - [Directory Structure](#-directory-structure)
 - [Commands Reference](#-commands-reference)
 - [Agent Compatibility](#-agent-compatibility)
-- [How Retrieval Works Without Embeddings](#-how-retrieval-works-without-embeddings)
+- [How Hybrid Retrieval Works](#-how-hybrid-retrieval-works)
 - [Supported Landmark Languages](#-supported-landmark-languages)
 - [Token Budgets](#-token-budgets--priority-truncation)
 - [Known Limitations & Trade-offs](#-known-limitations--trade-offs)
@@ -58,7 +58,7 @@ Init once — your AI agent does the reading, learning, and checkpointing.
 ## 🎯 About
 
 > [!NOTE]
-> **Status: Alpha (v0.1.0)**. Recall gives AI coding agents persistent project memory in plain Markdown inside `.recall/`.
+> **Status: Alpha (v0.2.0)**. Recall gives AI coding agents persistent project memory in plain Markdown inside `.recall/`.
 
 AI coding agents forget decisions between sessions and repeatedly re-scan entire repositories. Recall gives them structured memory and codebase topology with complete automation and zero prompt bloat.
 

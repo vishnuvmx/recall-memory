@@ -27,7 +27,7 @@ const print = (s = ''): void => console.log(s);
 
 const program = new Command('recall')
   .description('Zero-maintenance, local-first project memory for AI coding agents. Plain Markdown, no network.')
-  .version('0.1.0');
+  .version('0.2.0');
 
 program
   .command('init')
