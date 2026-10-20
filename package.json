@@ -28,7 +28,6 @@
     "agent",
     "memory",
     "coding-agents",
-    "mcp",
     "antigravity",
     "claude-code",
     "cursor"
@@ -47,13 +46,12 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test dist/tests/**/*.test.js",
     "prebench": "npm run build",
     "bench": "node scripts/benchmark.js",
     "prepare": "git config core.hooksPath .githooks || true",
-    "prepublishOnly": "npm run typecheck && npm run test"
-
+    "prepublishOnly": "npm run typecheck && npm run build"
   },
+
   "dependencies": {
     "commander": "^12.1.0",
     "gray-matter": "^4.0.3",

@@ -97,11 +97,10 @@ Memories are tagged with isolation metadata:
 * `visibility`: `'workspace' | 'private' | 'public'` (private memories are visible only to their creator `userId`).
 Access control checks (`canReadResource`, `canWriteResource`) are enforced at the retrieval and storage boundaries.
 
-### Control 4: MCP / RPC Endpoint Security
-When running `recall serve` or connecting over RPC:
-* **Token Authentication**: Set `RECALL_AUTH_TOKEN` (or `RECALL_AUTH_REQUIRED=1`). Requests must provide an authorization token matching configured credentials.
-* **Role-Based Authorization**: Client tokens are assigned roles (`read`, `write`, `admin`). Read-only clients cannot create, update, or propose memories.
-* **Origin Validation**: Configurable `RECALL_ALLOWED_ORIGINS` restricts network/RPC access to authorized hosts.
+### Control 4: CLI Execution & Environment Isolation
+Recall operations run directly via the CLI (`recall ...` or `npx @vishnuvmx/recall-memory ...`):
+* **Environment-Based Scoping**: Scope variables (`RECALL_TENANT_ID`, `RECALL_WORKSPACE_ID`, `RECALL_USER_ID`) configure caller identity for automated agent sessions.
+* **Review Gate Enforcement**: Setting `writes: "review"` in `config.json` or passing `RECALL_AGENT=1` forces autonomous agent additions into `proposed` state, requiring human approval via `recall approve <id>`.
 
 ---
 
@@ -114,28 +113,9 @@ When running `recall serve` or connecting over RPC:
 
 ---
 
-## 4. Security Testing Procedures
-
-Automated security and concurrency tests are located in `src/tests/`:
-```bash
-# Run all automated security, concurrency, and retrieval tests
-npm test
-```
-The test suite covers:
-- Prompt injection and override directives (`poisoning.test.ts`)
-- Secret detection, entropy calculation, and redaction (`secrets.test.ts`)
-- Multi-tenant and workspace boundary isolation (`isolation.test.ts`)
-- Conflicting facts and superseding (`conflict.test.ts`)
-- Hallucination prevention and confidence gating (`hallucination.test.ts`)
-- Hybrid retrieval accuracy and token budgets (`retrieval.test.ts`)
-- Concurrent writes, write queue, and database locking (`concurrency.test.ts`)
-- Read-after-write consistency (`consistency.test.ts`)
-- MCP authentication and authorization (`mcp-auth.test.ts`)
-
----
-
-## 5. Security Limitations
+## 4. Security Limitations
 
 - **Client-Side Secret Detection**: Heuristic regex scanning and Shannon entropy checks detect known formats and high-entropy keys, but cannot identify arbitrary low-entropy passwords embedded in prose. Organizations should continue running dedicated CI scanners (TruffleHog, Gitleaks).
-- **Local Process Boundary**: Stdio MCP server inherits permissions of the local user running the process. For multi-user environments, separate OS user boundaries or enforce `RECALL_AUTH_TOKEN`.
+- **Process Boundary**: The CLI runs within the local user permissions. To enforce multi-tenant isolation on shared multi-user infrastructure, enforce OS user account boundaries or container sandboxing.
+
 

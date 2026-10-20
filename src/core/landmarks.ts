@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { toPosix } from '../utils/fs.js';
-import { DEFAULT_IGNORED_DIRS, createGitignoreFilter } from './mapper.js';
+import { DEFAULT_IGNORED_DIRS, TEST_FILE_REGEX, createGitignoreFilter } from './mapper.js';
+
 
 export interface Landmark {
   name: string;
@@ -267,8 +268,9 @@ export function scanLandmarks(
         if (DEFAULT_IGNORED_DIRS.has(entry.name) || isGitignored(rel, true)) continue;
         walk(path.join(currentDir, entry.name));
       } else if (entry.isFile()) {
-        if (isGitignored(rel, false)) continue;
+        if (isGitignored(rel, false) || TEST_FILE_REGEX.test(entry.name)) continue;
         const ext = path.extname(entry.name).toLowerCase();
+
         if (!SUPPORTED_EXTS.has(ext)) continue;
 
         try {

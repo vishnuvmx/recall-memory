@@ -177,8 +177,9 @@ export function scanProject(root: string, maxDepth = 3, opts?: ScanProjectOption
         if (DEFAULT_IGNORED_DIRS.has(entry.name) || isGitignored(rel, true)) continue;
         dirs.push(entry);
       } else if (entry.isFile()) {
-        if (isGitignored(rel, false)) continue;
+        if (isGitignored(rel, false) || TEST_FILE_REGEX.test(entry.name)) continue;
         files.push(entry);
+
         const ext = path.extname(entry.name).toLowerCase();
         if (ext) extCount.set(ext, (extCount.get(ext) ?? 0) + 1);
 
