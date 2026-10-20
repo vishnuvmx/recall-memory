@@ -8,8 +8,21 @@ export function configPath(recallDir: string): string {
 }
 
 export function defaultConfig(): RecallConfig {
-  return { version: 1, agentFile: 'AGENTS.md', profile: 'standard', retentionDays: 14, maxLogEntries: 50, writes: 'auto' };
+  return {
+    version: 1,
+    agentFile: 'AGENTS.md',
+    profile: 'standard',
+    retentionDays: 14,
+    maxLogEntries: 50,
+    writes: 'auto',
+    tenantId: 'default',
+    workspaceId: 'default',
+    projectId: 'default',
+    authRequired: false,
+    hybridRetrieval: true,
+  };
 }
+
 
 export function loadConfig(recallDir: string): RecallConfig {
   const file = configPath(recallDir);

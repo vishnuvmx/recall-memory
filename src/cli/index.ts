@@ -95,10 +95,40 @@ program
   .option('--active', 'force active status regardless of write mode')
   .option('--approved', 'alias for --active')
   .option('--proposed', 'force proposed status (needs `recall approve`)')
-  .action((text: string, o: { title?: string; type: MemoryType; tag: string[]; source: string[]; active?: boolean; approved?: boolean; proposed?: boolean }) => {
+  .option('--confidence <num>', 'confidence score 0.0 to 1.0 (scores < 0.7 require review)', parseFloat)
+  .option('--evidence <ref>', 'evidence reference (repeatable)', collect, [] as string[])
+  .option('--expires <date>', 'expiration date YYYY-MM-DD')
+  .option('--tenant <id>', 'tenant ID for isolation')
+  .option('--workspace <id>', 'workspace ID for isolation')
+  .action((text: string, o: {
+    title?: string;
+    type: MemoryType;
+    tag: string[];
+    source: string[];
+    evidence: string[];
+    confidence?: number;
+    expires?: string;
+    tenant?: string;
+    workspace?: string;
+    active?: boolean;
+    approved?: boolean;
+    proposed?: boolean;
+  }) => {
     const title = o.title ?? (text.split('\n')[0] ?? '').slice(0, 80);
     const forced = o.active || o.approved ? 'active' : o.proposed ? 'proposed' : undefined;
-    const r = agentRemember(cwd(), { title, text, type: o.type, tags: o.tag, sources: o.source, status: forced });
+    const r = agentRemember(cwd(), {
+      title,
+      text,
+      type: o.type,
+      tags: o.tag,
+      sources: o.source,
+      evidence: o.evidence,
+      confidence: o.confidence,
+      expiresAt: o.expires,
+      tenantId: o.tenant,
+      workspaceId: o.workspace,
+      status: forced,
+    });
     const m = r.memory;
     print(`${r.action === 'updated' ? 'Updated' : 'Saved'} ${m.id} (${m.type}, ${m.status}, ${m.verification}) -> .recall/${m.file}`);
     if (m.status === 'proposed') print(`  Proposed: run \`recall approve ${m.id}\` to make it searchable.`);
@@ -136,7 +166,7 @@ program
 
 program
   .command('context')
-  .description('Retrieve relevant memories by deterministic keyword search (compact, capped at ~400 tokens)')
+  .description('Retrieve relevant memories by hybrid keyword/vector search (compact, capped at ~400 tokens)')
   .argument('<task>', 'task description')
   .option('-n, --limit <n>', 'max results', parseLimit, 5)
   .option('--format <format>', 'text|json', 'text')
@@ -145,15 +175,37 @@ program
   .option('--tag <tag>', 'filter by tag')
   .option('--include-proposed', 'include unapproved proposals')
   .option('--include-archived', 'include archived memories')
-  .action((task: string, o: { limit: number; format: string; verbose?: boolean; type?: MemoryType; tag?: string; includeProposed?: boolean; includeArchived?: boolean }) => {
+  .option('--no-hybrid', 'disable hybrid retrieval (use keyword search only)')
+  .option('--tenant <id>', 'tenant ID for isolation')
+  .option('--workspace <id>', 'workspace ID for isolation')
+  .action((task: string, o: {
+    limit: number;
+    format: string;
+    verbose?: boolean;
+    type?: MemoryType;
+    tag?: string;
+    includeProposed?: boolean;
+    includeArchived?: boolean;
+    hybrid?: boolean;
+    tenant?: string;
+    workspace?: string;
+  }) => {
     if (o.format !== 'text' && o.format !== 'json') throw new RecallError('--format must be text or json.');
+    const secContext = o.tenant || o.workspace ? {
+      tenantId: o.tenant || 'default',
+      workspaceId: o.workspace || 'default',
+      projectId: 'default',
+    } : undefined;
     const hits = context(cwd(), task, {
       limit: o.limit,
       type: o.type,
       tag: o.tag,
       includeProposed: !!o.includeProposed,
       includeArchived: !!o.includeArchived,
+      hybrid: o.hybrid,
+      securityContext: secContext,
     });
+
     if (o.format === 'json') {
       print(JSON.stringify(hits.map((h) => ({
         id: h.memory.id, title: h.memory.title, type: h.memory.type, status: h.memory.status,

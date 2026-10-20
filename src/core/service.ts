@@ -4,18 +4,35 @@ import { loadConfig } from './config.js';
 import { gitInfo, recallChanges, recallHistory, undoRecall, type Commit, type UndoResult } from './git.js';
 import { indexState, rebuildIndex, type IndexState } from './index-builder.js';
 import { generateProjectMap } from './mapper.js';
-import { appendChangelog, createMemory, loadAll, rewriteMemory, updateMemory, type Memory, type NewMemory } from './memory.js';
+import { appendChangelog, createMemory, findMemory, loadAll, rewriteMemory, updateMemory, type Memory, type NewMemory } from './memory.js';
 import { requireInitialized, type Project } from './project.js';
 import { search, tokenize, type SearchHit, type SearchOptions } from './retrieval.js';
+import { hybridSearch, type HybridSearchHit, type HybridSearchOptions } from './hybrid-retrieval.js';
+import { detectConflicts, supersedeMemory } from './conflict.js';
+import { getSharedSqliteStore } from './sqlite-store.js';
 import { where, type WhereHit } from './where.js';
 import { PROFILE_BUDGETS, type ProfileTier, type WriteMode } from '../schemas/index.js';
+import type { SecurityContext } from '../security/isolation.js';
 import fs from 'node:fs';
 import { resolveInside } from '../utils/fs.js';
 
-/** Create a memory, log it, and refresh the index. */
+export interface ContextOptions extends SearchOptions {
+  hybrid?: boolean;
+  securityContext?: SecurityContext;
+  maxTokens?: number;
+  maxChars?: number;
+  includeSuperseded?: boolean;
+}
+
+/** Create a memory, log it, sync with SQLite, and refresh the index. */
 export function remember(start: string, input: NewMemory, action = 'remember'): Memory {
   const p = requireInitialized(start);
   const m = createMemory(p.recallDir, input);
+  try {
+    getSharedSqliteStore(p.recallDir).upsertMemorySync(m);
+  } catch {
+    /* fallback to plain markdown if sqlite unavailable */
+  }
   appendChangelog(p.recallDir, action, m);
   rebuildIndex(p.recallDir);
   return m;
@@ -57,6 +74,7 @@ export interface RememberResult {
  * - `writes: review` or RECALL_AGENT=1: lands as `proposed`.
  * A near-duplicate title updates the existing memory instead of adding another file, which keeps
  * retrieval results (and their token cost) from growing with repetition.
+ * Also handles conflicting facts by superseding older conflicting memories.
  */
 export function agentRemember(start: string, input: NewMemory): RememberResult {
   const p = requireInitialized(start);
@@ -68,14 +86,38 @@ export function agentRemember(start: string, input: NewMemory): RememberResult {
   }
   const status = input.status ?? (mode === 'review' || process.env.RECALL_AGENT === '1' ? 'proposed' : 'active');
   const type = input.type ?? 'fact';
+  const allMemories = loadAll(p.recallDir).memories;
+
   // In review mode never silently rewrite an approved memory; only merge into other proposals.
-  const candidates = loadAll(p.recallDir).memories.filter(
+  const candidates = allMemories.filter(
     (m) => m.type === type && (status === 'active' ? m.status === 'active' || m.status === 'proposed' : m.status === 'proposed'),
   );
   const dup = findDuplicate(candidates, input.title);
   const memory = dup
     ? rewriteMemory(p.recallDir, dup.id, { ...input, type, status })
     : createMemory(p.recallDir, { ...input, type, status });
+
+  // Handle conflicting facts when saving an active memory: supersede conflicting older active memories
+  if (!dup && status === 'active') {
+    const conflict = detectConflicts(allMemories, input);
+    if (conflict.hasConflict) {
+      for (const oldMem of conflict.conflictingMemories) {
+        supersedeMemory(p.recallDir, oldMem.id, memory.id, `Superseded by ${memory.id}: ${memory.title}`);
+        try {
+          getSharedSqliteStore(p.recallDir).upsertMemorySync(findMemory(p.recallDir, oldMem.id));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+
+  try {
+    getSharedSqliteStore(p.recallDir).upsertMemorySync(memory);
+  } catch {
+    /* fallback to plain markdown */
+  }
+
   appendChangelog(p.recallDir, dup ? 'update' : 'remember', memory);
   rebuildIndex(p.recallDir);
   return { memory, action: dup ? 'updated' : 'created' };
@@ -88,7 +130,12 @@ export function whereIs(start: string, query: string, limit?: number): WhereHit[
 
 export function approve(start: string, id: string): Memory {
   const p = requireInitialized(start);
-  const m = updateMemory(p.recallDir, id, { status: 'active' });
+  const m = updateMemory(p.recallDir, id, { status: 'active', verification: 'verified' });
+  try {
+    getSharedSqliteStore(p.recallDir).upsertMemorySync(m);
+  } catch {
+    /* ignore */
+  }
   appendChangelog(p.recallDir, 'approve', m);
   rebuildIndex(p.recallDir);
   return m;
@@ -97,15 +144,48 @@ export function approve(start: string, id: string): Memory {
 export function archive(start: string, id: string): Memory {
   const p = requireInitialized(start);
   const m = updateMemory(p.recallDir, id, { status: 'archived' });
+  try {
+    getSharedSqliteStore(p.recallDir).upsertMemorySync(m);
+  } catch {
+    /* ignore */
+  }
   appendChangelog(p.recallDir, 'archive', m);
   rebuildIndex(p.recallDir);
   return m;
 }
 
-export function context(start: string, query: string, opts: SearchOptions = {}): SearchHit[] {
+export function context(start: string, query: string, opts: ContextOptions = {}): SearchHit[] {
   const p = requireInitialized(start);
-  return search(loadAll(p.recallDir).memories, query, opts);
+  const all = loadAll(p.recallDir).memories;
+  const isHybrid = opts.hybrid !== false;
+
+  if (isHybrid) {
+    let store;
+    try {
+      store = getSharedSqliteStore(p.recallDir);
+    } catch {
+      /* fallback */
+    }
+
+    const hits = hybridSearch(all, query, {
+      limit: opts.limit,
+      type: opts.type,
+      tag: opts.tag,
+      includeProposed: opts.includeProposed,
+      includeArchived: opts.includeArchived,
+      includeSuperseded: opts.includeSuperseded,
+      minScore: opts.minScore,
+      securityContext: opts.securityContext,
+      sqliteStore: store,
+      maxTokens: opts.maxTokens,
+      maxChars: opts.maxChars,
+    });
+    return hits.map((h) => ({ memory: h.memory, score: h.score, excerpt: h.excerpt }));
+  }
+
+  return search(all, query, opts);
 }
+
 
 export interface TokenFootprint {
   totalTokens: number;

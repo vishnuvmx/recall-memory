@@ -10,6 +10,8 @@ import {
 } from '../schemas/index.js';
 import { RecallError, atomicWrite, resolveInside, toPosix, today } from '../utils/fs.js';
 import { assertNoSecrets } from '../utils/secrets.js';
+import { assertNotPoisoned } from '../security/poisoning.js';
+import type { Visibility } from '../schemas/index.js';
 
 export interface Memory extends MemoryMeta {
   body: string;
@@ -65,6 +67,7 @@ function listMarkdown(recallDir: string, dir: string): string[] {
 
 export function loadAll(recallDir: string): LoadResult {
   const result: LoadResult = { memories: [], plainDocs: [], problems: [] };
+  const todayStr = today();
   for (const dir of MEMORY_DIRS) {
     for (const name of listMarkdown(recallDir, dir)) {
       const rel = `${dir}/${name}`;
@@ -93,7 +96,14 @@ export function loadAll(recallDir: string): LoadResult {
         result.problems.push({ file: rel, error: `Invalid metadata: ${msg}` });
         continue;
       }
-      result.memories.push({ ...meta.data, body: parsed.content.trim(), file: rel });
+      const data = meta.data;
+      // Auto-deprecate expired memories so outdated instructions do not compete with current ones
+      if (data.expiresAt && data.expiresAt < todayStr && data.status === 'active') {
+        data.status = 'superseded';
+        data.deprecated = true;
+        data.deprecatedReason = data.deprecatedReason || `Expired on ${data.expiresAt}`;
+      }
+      result.memories.push({ ...data, body: parsed.content.trim(), file: rel });
     }
   }
   const seen = new Map<string, string>();
@@ -126,10 +136,23 @@ export interface NewMemory {
   tags?: string[];
   sources?: string[];
   status?: Lifecycle;
+  confidence?: number;
+  evidence?: string[];
+  validFrom?: string;
+  expiresAt?: string;
+  version?: number;
+  supersededBy?: string;
+  deprecated?: boolean;
+  deprecatedReason?: string;
+  tenantId?: string;
+  workspaceId?: string;
+  projectId?: string;
+  userId?: string;
+  visibility?: Visibility;
 }
 
 function serialize(meta: MemoryMeta, body: string): string {
-  const ordered = {
+  const ordered: Record<string, unknown> = {
     id: meta.id,
     title: meta.title,
     type: meta.type,
@@ -138,7 +161,19 @@ function serialize(meta: MemoryMeta, body: string): string {
     tags: meta.tags,
     status: meta.status,
     verification: meta.verification,
-    ...(meta.sources.length > 0 ? { sources: meta.sources } : {}),
+    confidence: meta.confidence ?? 1.0,
+    ...(meta.evidence && meta.evidence.length > 0 ? { evidence: meta.evidence } : {}),
+    ...(meta.sources && meta.sources.length > 0 ? { sources: meta.sources } : {}),
+    ...(meta.validFrom ? { validFrom: meta.validFrom } : {}),
+    ...(meta.expiresAt ? { expiresAt: meta.expiresAt } : {}),
+    version: meta.version ?? 1,
+    ...(meta.supersededBy ? { supersededBy: meta.supersededBy } : {}),
+    ...(meta.deprecated ? { deprecated: meta.deprecated, deprecatedReason: meta.deprecatedReason } : {}),
+    tenantId: meta.tenantId ?? 'default',
+    workspaceId: meta.workspaceId ?? 'default',
+    projectId: meta.projectId ?? 'default',
+    ...(meta.userId ? { userId: meta.userId } : {}),
+    visibility: meta.visibility ?? 'workspace',
   };
   return matter.stringify(`\n${body.trim()}\n`, ordered);
 }
@@ -149,11 +184,17 @@ export function createMemory(recallDir: string, input: NewMemory): Memory {
   if (!title) throw new RecallError('A memory needs a non-empty title.');
   if (!text) throw new RecallError('A memory needs non-empty text.');
   assertNoSecrets(`${title}\n${text}`);
+  assertNotPoisoned(`${title}\n${text}`);
 
   const type = input.type ?? 'fact';
   const dir = TYPE_DIR[type];
   const loaded = loadAll(recallDir).memories;
   let n = maxIdNumber(recallDir, loaded) + 1;
+
+  const confidence = input.confidence !== undefined ? input.confidence : 1.0;
+  // Require explicit confirmation for low-confidence claims by forcing status: 'proposed'
+  const forcedStatus = confidence < 0.7 ? 'proposed' : undefined;
+  const verification: Verification = confidence < 0.7 ? 'needs_review' : 'unverified';
 
   for (let attempt = 0; attempt < 100; attempt++, n++) {
     const id = `mem_${String(n).padStart(3, '0')}`;
@@ -165,9 +206,22 @@ export function createMemory(recallDir: string, input: NewMemory): Memory {
       created: date,
       updated: date,
       tags: [...new Set((input.tags ?? []).map((t) => t.trim()).filter(Boolean))],
-      status: input.status ?? (process.env.RECALL_AGENT === '1' ? 'proposed' : 'active'),
-      verification: 'unverified',
+      status: forcedStatus ?? input.status ?? (process.env.RECALL_AGENT === '1' ? 'proposed' : 'active'),
+      verification,
       sources: input.sources ?? [],
+      confidence,
+      evidence: input.evidence ?? [],
+      validFrom: input.validFrom ?? date,
+      expiresAt: input.expiresAt,
+      version: input.version ?? 1,
+      supersededBy: input.supersededBy,
+      deprecated: input.deprecated ?? false,
+      deprecatedReason: input.deprecatedReason,
+      tenantId: input.tenantId ?? 'default',
+      workspaceId: input.workspaceId ?? 'default',
+      projectId: input.projectId ?? 'default',
+      userId: input.userId,
+      visibility: input.visibility ?? 'workspace',
     });
     const name = `${id}-${slugify(title)}.md`;
     const abs = resolveInside(recallDir, dir, name);
@@ -193,6 +247,13 @@ export function findMemory(recallDir: string, id: string): Memory {
 export interface Patch {
   status?: Lifecycle;
   verification?: Verification;
+  confidence?: number;
+  evidence?: string[];
+  expiresAt?: string;
+  version?: number;
+  supersededBy?: string;
+  deprecated?: boolean;
+  deprecatedReason?: string;
 }
 
 export function updateMemory(recallDir: string, id: string, patch: Patch): Memory {
@@ -213,14 +274,24 @@ export function rewriteMemory(recallDir: string, id: string, input: NewMemory): 
   const text = input.text.trim();
   if (!text) throw new RecallError('A memory needs non-empty text.');
   assertNoSecrets(`${title}\n${text}`);
+  assertNotPoisoned(`${title}\n${text}`);
+
+  const confidence = input.confidence !== undefined ? input.confidence : m.confidence ?? 1.0;
   const next: MemoryMeta = memoryMetaSchema.parse({
     ...m,
     title,
     updated: today(),
+    version: (m.version ?? 1) + 1,
     tags: [...new Set([...m.tags, ...(input.tags ?? []).map((t) => t.trim()).filter(Boolean)])],
     sources: [...new Set([...m.sources, ...(input.sources ?? [])])],
-    status: input.status ?? m.status,
-    verification: 'unverified',
+    evidence: [...new Set([...(m.evidence ?? []), ...(input.evidence ?? [])])],
+    confidence,
+    status: confidence < 0.7 ? 'proposed' : (input.status ?? m.status),
+    verification: confidence < 0.7 ? 'needs_review' : 'unverified',
+    expiresAt: input.expiresAt ?? m.expiresAt,
+    supersededBy: input.supersededBy ?? m.supersededBy,
+    deprecated: input.deprecated ?? m.deprecated,
+    deprecatedReason: input.deprecatedReason ?? m.deprecatedReason,
   });
   const body = text.startsWith('#') ? text : `# ${title}\n\n${text}`;
   atomicWrite(resolveInside(recallDir, ...m.file.split('/')), serialize(next, body));
@@ -233,3 +304,4 @@ export function appendChangelog(recallDir: string, action: string, m: { id: stri
   const prev = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '# Recall changelog\n\n';
   atomicWrite(file, prev.endsWith('\n') ? prev + line : `${prev}\n${line}`);
 }
+

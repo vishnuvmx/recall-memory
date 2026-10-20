@@ -22,6 +22,9 @@ const dateString = z.preprocess(
   z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'expected YYYY-MM-DD'),
 );
 
+export const VISIBILITY = ['private', 'workspace', 'public'] as const;
+export type Visibility = (typeof VISIBILITY)[number];
+
 export const memoryMetaSchema = z.object({
   id: z.string().regex(/^mem_[a-z0-9_]+$/i, 'expected mem_<id>'),
   title: z.string().trim().min(1),
@@ -32,6 +35,19 @@ export const memoryMetaSchema = z.object({
   status: z.enum(LIFECYCLE),
   verification: z.enum(VERIFICATION),
   sources: z.array(z.string()).default([]),
+  confidence: z.number().min(0).max(1).default(1.0),
+  evidence: z.array(z.string()).default([]),
+  validFrom: dateString.optional(),
+  expiresAt: dateString.optional(),
+  version: z.number().int().positive().default(1),
+  supersededBy: z.string().optional(),
+  deprecated: z.boolean().default(false),
+  deprecatedReason: z.string().optional(),
+  tenantId: z.string().default('default'),
+  workspaceId: z.string().default('default'),
+  projectId: z.string().default('default'),
+  userId: z.string().optional(),
+  visibility: z.enum(VISIBILITY).default('workspace'),
 });
 export type MemoryMeta = z.infer<typeof memoryMetaSchema>;
 
@@ -56,6 +72,13 @@ export const configSchema = z
     maxLogEntries: z.number().int().positive().default(50),
     /** `auto`: agent memory writes are active immediately. `review`: they land as `proposed` for human approval. */
     writes: z.enum(WRITE_MODES).default('auto'),
+    authToken: z.string().optional(),
+    authRequired: z.boolean().default(false),
+    tenantId: z.string().default('default'),
+    workspaceId: z.string().default('default'),
+    projectId: z.string().default('default'),
+    hybridRetrieval: z.boolean().default(true),
   })
   .strict();
 export type RecallConfig = z.infer<typeof configSchema>;
+
