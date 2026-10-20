@@ -27,7 +27,16 @@ export const DEFAULT_IGNORED_DIRS = new Set([
   'target',
   'bin',
   'obj',
+  'tests',
+  'test',
+  '__tests__',
+  '__test__',
+  'spec',
+  'specs',
 ]);
+
+export const TEST_FILE_REGEX = /\.(?:test|spec)\.[a-zA-Z0-9]+$|_(?:test|spec)\.[a-zA-Z0-9]+$/i;
+
 
 const ENTRY_FILENAMES = new Set([
   'index.ts',

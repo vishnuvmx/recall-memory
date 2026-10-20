@@ -3,7 +3,6 @@ import path from 'node:path';
 import { HOOK_COMMAND, HOOK_NAME } from './agent.js';
 import { loadConfig } from './config.js';
 import { requireInitialized } from './project.js';
-import { TOOLS } from '../mcp/server.js';
 import { extractManagedBlock } from '../utils/managed.js';
 
 /** Rough estimate (~4 chars/token for English/code). Labelled as an estimate everywhere it is shown. */
@@ -19,13 +18,12 @@ export interface CostReport {
   /** Sent on every agent turn. */
   alwaysOn: CostLine[];
   alwaysOnTotal: number;
-  /** Only sent if the MCP server is configured. */
-  mcp: CostLine;
   /** Only paid when the agent explicitly reads/calls it. */
   onDemand: CostLine[];
   /** Problems that make Recall cost more than it should (fixed by re-running `recall init`). */
   warnings: string[];
 }
+
 
 function read(file: string): string | null {
   try {
@@ -92,8 +90,8 @@ export function costReport(start: string): CostReport {
   return {
     alwaysOn,
     alwaysOnTotal: alwaysOn.reduce((s, l) => s + l.tokens, 0),
-    mcp: { source: `MCP tool schemas (${TOOLS.length} tools)`, tokens: estimateTokens(JSON.stringify(TOOLS)), note: 'only if `recall serve` is configured' },
     onDemand,
     warnings,
   };
 }
+

@@ -9,7 +9,6 @@ import { agentRemember, approve, approveAll, archive, archiveAll, checkpoint, co
 import { seed } from '../core/seed.js';
 import { requireInitialized } from '../core/project.js';
 import { formatWhere } from '../core/where.js';
-import { serveStdio } from '../mcp/server.js';
 import { MEMORY_TYPES, PROFILE_TIERS, type MemoryType, type ProfileTier } from '../schemas/index.js';
 import { RecallError } from '../utils/fs.js';
 
@@ -252,8 +251,6 @@ program
     print('Always-on (sent with every agent turn):');
     r.alwaysOn.forEach(row);
     print(`  ${'TOTAL'.padEnd(40)} ~${String(r.alwaysOnTotal).padStart(5)} tok`);
-    print('\nMCP (only if configured):');
-    row(r.mcp);
     print('\nOn-demand (only when the agent asks):');
     r.onDemand.forEach(row);
     print('\nEstimates use ~4 characters per token.');
@@ -468,15 +465,6 @@ program
     print(`Session log pruned:`);
     print(`  Removed:   ${res.removedCount} old entries`);
     print(`  Remaining: ${res.remainingCount} entries within ${days}-day retention window.`);
-  });
-
-
-program
-  .command('serve')
-  .description('Run a local MCP server over stdio exposing recall_context, recall_where and recall_remember')
-  .action(() => {
-    requireInitialized(cwd());
-    serveStdio(cwd());
   });
 
 try {
