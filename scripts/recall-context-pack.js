@@ -32,3 +32,4 @@ if (query) {
 }
 
 process.stdout.write(`${sections.join('\n')}\n`);
+

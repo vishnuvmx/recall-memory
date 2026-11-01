@@ -125,9 +125,16 @@ const BOILERPLATE_SNIPPETS = [
 ];
 
 function isBoilerplateDoc(raw: string): boolean {
-  const trimmed = raw.trim();
-  if (!trimmed) return true;
-  return BOILERPLATE_SNIPPETS.some((s) => trimmed.includes(s));
+  let stripped = raw;
+  for (const s of BOILERPLATE_SNIPPETS) {
+    stripped = stripped.replace(s, '');
+  }
+  stripped = stripped
+    .replace(/Short overview of this project\. Edit this file by hand; Recall never overwrites it\./g, '')
+    .replace(/Detailed knowledge is indexed in \[INDEX\.md\]\(INDEX\.md\)\.[^\n]*/g, '')
+    .replace(/^#+\s+.*$/gm, '')
+    .trim();
+  return stripped.length < 10;
 }
 
 /**

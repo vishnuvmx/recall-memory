@@ -691,3 +691,4 @@ export async function runLifecycleHook(fallbackCwd = process.cwd()): Promise<str
   const raw = await readStdinNonBlocking();
   return processLifecycleHookInput(raw, fallbackCwd);
 }
+

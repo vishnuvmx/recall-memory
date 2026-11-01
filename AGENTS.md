@@ -2,9 +2,10 @@
 
 <!-- recall:begin -->
 ## Project memory (Recall)
-Memory is in `.recall/`. Don't read it upfront; skip it for routine edits.
-- Unfamiliar area or design question: `recall context "<topic>"`
-- Find a symbol or file: `recall where <name>`
-- Learned a non-obvious rule or bug cause: `recall remember "<text>" -t "<title>" --type <decision|convention|lesson>`
-Sessions are logged automatically; no wrap-up needed.
+Memory is in `.recall/`. Skip for trivial edits.
+- New chat: read `.recall/PASSPORT.md` first (non-volatile blueprint; never cold-scan repo).
+- Past decisions/bugs: `recall context "<topic>"`
+- Locate symbol/file: `recall where <name>`
+- Save rule/fix: `recall remember "<text>" -t "<title>" --type <decision|convention|lesson|bugfix>`
+Chats sync locally via hooks.
 <!-- recall:end -->

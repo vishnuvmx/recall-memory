@@ -202,9 +202,9 @@ export function extractProjectIdentity(root: string): ProjectIdentity {
   const readmeSummary = extractReadmeSummary(root);
   if (!purpose && readmeSummary) {
     purpose = readmeSummary;
-  } else if (purpose && readmeSummary && !readmeSummary.toLowerCase().includes(purpose.toLowerCase().slice(0, 25))) {
-    const combined = `${purpose} ${readmeSummary}`;
-    purpose = combined.length > 260 ? `${combined.slice(0, 257)}...` : combined;
+  } else if (purpose && purpose.length < 35 && readmeSummary) {
+    const combined = `${purpose} — ${readmeSummary.replace(/\*\*/g, '')}`;
+    purpose = combined.length > 240 ? `${combined.slice(0, 237)}...` : combined;
   }
 
   if (stack.length === 0) stack.push('Generic Workspace');
@@ -229,8 +229,9 @@ function extractBulletsFromPlainDoc(body: string, maxBullets = 5): string[] {
   const bullets: string[] = [];
   for (const rawLine of body.split('\n')) {
     const line = rawLine.trim();
-    if (!line.startsWith('- ') && !line.startsWith('* ')) continue;
-    const text = line.slice(2).trim();
+    const match = /^(?:[-*]|\d+\.)\s+(.+)$/.exec(line);
+    if (!match?.[1]) continue;
+    const text = match[1].trim();
     if (!text || text.startsWith('(Add ') || text.includes('[INDEX.md]')) continue;
     bullets.push(text.length > 160 ? `${text.slice(0, 157)}...` : text);
     if (bullets.length >= maxBullets) break;
@@ -270,15 +271,20 @@ export function buildPassportMarkdown(
     lines.push('');
   }
 
-  // Group non-volatile module exports (sorted deterministically by path, no volatile line numbers!)
-  const sortedFiles = [...files].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+  // Prioritize primary source directories (src/, lib/, app/, packages/) ahead of auxiliary scripts/
+  const pathPriority = (p: string): number => (/^(?:src|lib|app|pkg|packages|cmd|internal)\//.test(p) ? 0 : 1);
+  const sortedFiles = [...files].sort(
+    (a, b) => pathPriority(a.relativePath) - pathPriority(b.relativePath) || a.relativePath.localeCompare(b.relativePath),
+  );
   const moduleLines: string[] = [];
   for (const f of sortedFiles) {
     const exportedSyms = f.landmarks.filter((lm) => lm.exported && lm.kind !== 'section').map((lm) => lm.name);
     const fallbackSyms = exportedSyms.length > 0
       ? exportedSyms
-      : f.landmarks.filter((lm) => lm.kind !== 'section').map((lm) => lm.name);
-    const uniqueSyms = [...new Set(fallbackSyms)].slice(0, 6);
+      : pathPriority(f.relativePath) === 0
+        ? f.landmarks.filter((lm) => lm.kind !== 'section').map((lm) => lm.name)
+        : [];
+    const uniqueSyms = [...new Set(fallbackSyms)].slice(0, 5);
     if (uniqueSyms.length > 0) {
       moduleLines.push(`- \`${f.relativePath}\`: \`${uniqueSyms.join('`, `')}\``);
     } else {
@@ -295,6 +301,7 @@ export function buildPassportMarkdown(
     }
   }
   for (const ruleDoc of memories.filter((m) => m.id.startsWith('doc_rules_'))) {
+    if (ruleDoc.id === 'doc_rules_workflows' && identity.scripts.length > 0) continue;
     for (const b of extractBulletsFromPlainDoc(ruleDoc.body, 3)) {
       invariantLines.push(`- ${b}`);
     }

@@ -37,3 +37,4 @@ async function main() {
 main().catch(() => {
   process.stdout.write('{}\n');
 });
+
