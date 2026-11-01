@@ -116,6 +116,77 @@ export function loadAll(recallDir: string): LoadResult {
   return result;
 }
 
+const BOILERPLATE_SNIPPETS = [
+  '(Add the few rules that must never be broken.)',
+  'Describe the architecture constraints agents must preserve.',
+  'Describe naming, formatting, and structure conventions.',
+  'List design tokens/components and the checks that enforce them.',
+  'Describe build, test, and release commands agents should use.',
+];
+
+function isBoilerplateDoc(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return true;
+  return BOILERPLATE_SNIPPETS.some((s) => trimmed.includes(s));
+}
+
+/**
+ * Loads all structured memories PLUS hand-curated non-volatile Markdown documents
+ * (`MEMORY.md` and plain `rules/*.md`) as searchable records so `recall context`
+ * and SQLite FTS5/vector search never miss human-authored project rules.
+ */
+export function loadSearchableMemories(recallDir: string): Memory[] {
+  const loaded = loadAll(recallDir);
+  const out: Memory[] = [...loaded.memories];
+
+  const addPlainDoc = (relPath: string, defaultTitle: string, defaultTags: string[], memType: MemoryType = 'convention'): void => {
+    try {
+      const abs = resolveInside(recallDir, ...relPath.split('/'));
+      if (!fs.existsSync(abs) || fs.lstatSync(abs).isSymbolicLink()) return;
+      const raw = fs.readFileSync(abs, 'utf8');
+      if (isBoilerplateDoc(raw)) return;
+      const stat = fs.statSync(abs);
+      const dateStr = stat.mtime.toISOString().slice(0, 10);
+      const headingMatch = /^#\s+(.+)$/m.exec(raw);
+      const title = headingMatch?.[1]?.trim() || defaultTitle;
+      const slug = slugify(relPath.replace(/\.md$/i, ''));
+      out.push({
+        id: `doc_${slug.replace(/-/g, '_')}`,
+        title,
+        type: memType,
+        created: dateStr,
+        updated: dateStr,
+        tags: defaultTags,
+        status: 'active',
+        verification: 'verified',
+        sources: [relPath],
+        confidence: 1.0,
+        evidence: [],
+        version: 1,
+        deprecated: false,
+        tenantId: 'default',
+        workspaceId: 'default',
+        projectId: 'default',
+        visibility: 'workspace',
+        body: raw.trim(),
+        file: relPath,
+      });
+    } catch {
+      // Ignore unreadable plain docs
+    }
+  };
+
+  addPlainDoc('MEMORY.md', 'Project Core Constraints & Memory', ['memory', 'invariants', 'constraints', 'architecture'], 'convention');
+
+  for (const rel of loaded.plainDocs) {
+    const base = path.basename(rel, '.md');
+    const memType: MemoryType = base.includes('design') ? 'design_system' : 'convention';
+    addPlainDoc(rel, `Rule: ${base}`, ['rules', base], memType);
+  }
+
+  return out;
+}
+
 function maxIdNumber(recallDir: string, loaded: Memory[]): number {
   let max = 0;
   for (const m of loaded) max = Math.max(max, Number(m.id.slice(4)));

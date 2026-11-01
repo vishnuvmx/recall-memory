@@ -379,7 +379,16 @@ export const MAP_BLOCK_NAME = 'recall:project-map';
 export function renderProjectMap(existing: string, data: ProjectMapData, profile: ProfileTier = 'standard'): string {
   const maxChars = profile === 'compact' ? 5600 : profile === 'frontier' ? 80000 : 24000;
   const content = buildProjectMapMarkdown(data, maxChars);
-  const base = existing.trim() === '' ? '# Project Map\n' : existing;
+  const beginMarker = `<!-- ${MAP_BLOCK_NAME}:begin -->`;
+  let cleanedExisting = existing;
+  const markerIdx = existing.indexOf(beginMarker);
+  // Strip legacy unmanaged map output written above the managed block by early versions
+  if (markerIdx > 0 && existing.slice(0, markerIdx).includes('# Project Map & Topology')) {
+    cleanedExisting = existing.slice(markerIdx);
+  } else if (markerIdx === -1 && existing.startsWith('# Project Map & Topology')) {
+    cleanedExisting = '';
+  }
+  const base = cleanedExisting.trim() === '' ? '' : cleanedExisting;
   return applyManagedBlock(base, content, MAP_BLOCK_NAME);
 }
 
@@ -396,6 +405,8 @@ export function generateProjectMap(root: string, recallDir: string, profile?: Pr
   const file = resolveInside(recallDir, 'PROJECT_MAP.md');
   const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
   const rendered = renderProjectMap(existing, data, effectiveProfile);
-  atomicWrite(file, rendered);
+  if (rendered !== existing) {
+    atomicWrite(file, rendered);
+  }
   return file;
 }

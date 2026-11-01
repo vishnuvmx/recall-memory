@@ -4,10 +4,11 @@ import { loadConfig } from './config.js';
 import { gitInfo, recallChanges, recallHistory, undoRecall, type Commit, type UndoResult } from './git.js';
 import { indexState, rebuildIndex, type IndexState } from './index-builder.js';
 import { generateProjectMap } from './mapper.js';
-import { appendChangelog, createMemory, findMemory, loadAll, rewriteMemory, updateMemory, type Memory, type NewMemory } from './memory.js';
+import { appendChangelog, createMemory, findMemory, loadAll, loadSearchableMemories, rewriteMemory, updateMemory, type Memory, type NewMemory } from './memory.js';
+import { syncPassport, type PassportSyncResult } from './passport.js';
 import { requireInitialized, type Project } from './project.js';
 import { search, tokenize, type SearchHit, type SearchOptions } from './retrieval.js';
-import { hybridSearch, type HybridSearchHit, type HybridSearchOptions } from './hybrid-retrieval.js';
+import { hybridSearch, type HybridSearchHit } from './hybrid-retrieval.js';
 import { detectConflicts, supersedeMemory } from './conflict.js';
 import { getSharedSqliteStore } from './sqlite-store.js';
 import { where, type WhereHit } from './where.js';
@@ -24,17 +25,26 @@ export interface ContextOptions extends SearchOptions {
   includeSuperseded?: boolean;
 }
 
-/** Create a memory, log it, sync with SQLite, and refresh the index. */
+function refreshDerivedStores(p: Project): void {
+  rebuildIndex(p.recallDir);
+  try {
+    getSharedSqliteStore(p.recallDir).ensureSynced(loadSearchableMemories(p.recallDir));
+  } catch {
+    /* fallback cleanly when node:sqlite unavailable */
+  }
+  try {
+    syncPassport(p.root, p.recallDir);
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/** Create a memory, log it, sync with SQLite, and refresh the index & passport. */
 export function remember(start: string, input: NewMemory, action = 'remember'): Memory {
   const p = requireInitialized(start);
   const m = createMemory(p.recallDir, input);
-  try {
-    getSharedSqliteStore(p.recallDir).upsertMemorySync(m);
-  } catch {
-    /* fallback to plain markdown if sqlite unavailable */
-  }
   appendChangelog(p.recallDir, action, m);
-  rebuildIndex(p.recallDir);
+  refreshDerivedStores(p);
   return m;
 }
 
@@ -103,23 +113,12 @@ export function agentRemember(start: string, input: NewMemory): RememberResult {
     if (conflict.hasConflict) {
       for (const oldMem of conflict.conflictingMemories) {
         supersedeMemory(p.recallDir, oldMem.id, memory.id, `Superseded by ${memory.id}: ${memory.title}`);
-        try {
-          getSharedSqliteStore(p.recallDir).upsertMemorySync(findMemory(p.recallDir, oldMem.id));
-        } catch {
-          /* ignore */
-        }
       }
     }
   }
 
-  try {
-    getSharedSqliteStore(p.recallDir).upsertMemorySync(memory);
-  } catch {
-    /* fallback to plain markdown */
-  }
-
   appendChangelog(p.recallDir, dup ? 'update' : 'remember', memory);
-  rebuildIndex(p.recallDir);
+  refreshDerivedStores(p);
   return { memory, action: dup ? 'updated' : 'created' };
 }
 
@@ -131,58 +130,55 @@ export function whereIs(start: string, query: string, limit?: number): WhereHit[
 export function approve(start: string, id: string): Memory {
   const p = requireInitialized(start);
   const m = updateMemory(p.recallDir, id, { status: 'active', verification: 'verified' });
-  try {
-    getSharedSqliteStore(p.recallDir).upsertMemorySync(m);
-  } catch {
-    /* ignore */
-  }
   appendChangelog(p.recallDir, 'approve', m);
-  rebuildIndex(p.recallDir);
+  refreshDerivedStores(p);
   return m;
 }
 
 export function archive(start: string, id: string): Memory {
   const p = requireInitialized(start);
   const m = updateMemory(p.recallDir, id, { status: 'archived' });
-  try {
-    getSharedSqliteStore(p.recallDir).upsertMemorySync(m);
-  } catch {
-    /* ignore */
-  }
   appendChangelog(p.recallDir, 'archive', m);
-  rebuildIndex(p.recallDir);
+  refreshDerivedStores(p);
   return m;
+}
+
+export function contextHybrid(start: string, query: string, opts: ContextOptions = {}): HybridSearchHit[] {
+  const p = requireInitialized(start);
+  const all = loadSearchableMemories(p.recallDir);
+  let store;
+  try {
+    store = getSharedSqliteStore(p.recallDir);
+    store.ensureSynced(all);
+  } catch {
+    /* fallback cleanly when node:sqlite unavailable */
+  }
+
+  return hybridSearch(all, query, {
+    limit: opts.limit,
+    type: opts.type,
+    tag: opts.tag,
+    includeProposed: opts.includeProposed,
+    includeArchived: opts.includeArchived,
+    includeSuperseded: opts.includeSuperseded,
+    minScore: opts.minScore,
+    securityContext: opts.securityContext,
+    sqliteStore: store,
+    maxTokens: opts.maxTokens,
+    maxChars: opts.maxChars,
+  });
 }
 
 export function context(start: string, query: string, opts: ContextOptions = {}): SearchHit[] {
   const p = requireInitialized(start);
-  const all = loadAll(p.recallDir).memories;
   const isHybrid = opts.hybrid !== false;
 
   if (isHybrid) {
-    let store;
-    try {
-      store = getSharedSqliteStore(p.recallDir);
-    } catch {
-      /* fallback */
-    }
-
-    const hits = hybridSearch(all, query, {
-      limit: opts.limit,
-      type: opts.type,
-      tag: opts.tag,
-      includeProposed: opts.includeProposed,
-      includeArchived: opts.includeArchived,
-      includeSuperseded: opts.includeSuperseded,
-      minScore: opts.minScore,
-      securityContext: opts.securityContext,
-      sqliteStore: store,
-      maxTokens: opts.maxTokens,
-      maxChars: opts.maxChars,
-    });
+    const hits = contextHybrid(start, query, opts);
     return hits.map((h) => ({ memory: h.memory, score: h.score, excerpt: h.excerpt }));
   }
 
+  const all = loadSearchableMemories(p.recallDir);
   return search(all, query, opts);
 }
 
@@ -212,7 +208,7 @@ function estimateTokens(chars: number): number {
 }
 
 function computeTokenFootprint(recallDir: string, profile: ProfileTier = 'standard'): TokenFootprint {
-  const targets = ['MEMORY.md', 'INDEX.md', 'PROJECT_MAP.md', 'CURRENT_STATE.md'];
+  const targets = ['PASSPORT.md', 'MEMORY.md', 'INDEX.md', 'PROJECT_MAP.md', 'CURRENT_STATE.md'];
   const files: Record<string, number> = {};
   let totalChars = 0;
 
@@ -284,12 +280,12 @@ export function approveAll(start: string): Memory[] {
   const proposals = getProposals(start);
   const approved: Memory[] = [];
   for (const m of proposals) {
-    const updated = updateMemory(p.recallDir, m.id, { status: 'active' });
+    const updated = updateMemory(p.recallDir, m.id, { status: 'active', verification: 'verified' });
     appendChangelog(p.recallDir, 'approve', updated);
     approved.push(updated);
   }
   if (approved.length > 0) {
-    rebuildIndex(p.recallDir);
+    refreshDerivedStores(p);
   }
   return approved;
 }
@@ -304,7 +300,7 @@ export function archiveAll(start: string): Memory[] {
     archived.push(updated);
   }
   if (archived.length > 0) {
-    rebuildIndex(p.recallDir);
+    refreshDerivedStores(p);
   }
   return archived;
 }
@@ -335,6 +331,11 @@ export function map(start: string, profile?: ProfileTier): string {
   return generateProjectMap(p.root, p.recallDir, profile);
 }
 
+export function passport(start: string, opts?: { profile?: ProfileTier; force?: boolean }): PassportSyncResult {
+  const p = requireInitialized(start);
+  return syncPassport(p.root, p.recallDir, opts);
+}
+
 export function checkpoint(start: string, summary?: string, opts?: CheckpointOptions): CheckpointResult {
   const p = requireInitialized(start);
   return recordCheckpoint(p.root, p.recallDir, summary, opts);
@@ -349,7 +350,7 @@ export function undo(start: string, opts?: { dryRun?: boolean }): UndoResult {
   const p = requireInitialized(start);
   const res = undoRecall(p.root, '.recall', opts);
   if (!opts?.dryRun && res.ok && fs.existsSync(p.recallDir)) {
-    rebuildIndex(p.recallDir);
+    refreshDerivedStores(p);
   }
   return res;
 }

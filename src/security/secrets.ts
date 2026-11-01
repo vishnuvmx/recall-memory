@@ -49,8 +49,8 @@ export function calculateShannonEntropy(str: string): number {
 }
 
 /**
- * Checks whether a candidate string looks like a standard UUID or common identifier
- * to avoid false positives in entropy scanning.
+ * Checks whether a candidate string looks like a standard UUID, source file path, or code symbol
+ * to avoid false positives in Shannon entropy scanning (explicit REGEX_PATTERNS still run first).
  */
 function isIgnoredToken(token: string): boolean {
   // UUID v4 format
@@ -59,6 +59,23 @@ function isIgnoredToken(token: string): boolean {
   }
   // Common long path/filename strings or hashes with prefixes
   if (/^(?:sha256|sha1|md5|git|commit):/i.test(token)) {
+    return true;
+  }
+  // Source file paths with known code/doc extensions (never contains '=' base64 padding)
+  if (
+    token.includes('/') &&
+    !token.includes('=') &&
+    !token.includes('+') &&
+    /\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|py|rs|go|dart|kt|java|swift|cs|cpp|c|h|hpp|php|rb|css|scss|html|yml|yaml|toml|sql|sh)$/i.test(token)
+  ) {
+    return true;
+  }
+  // Scoped npm package paths or standard repo directory paths
+  if (
+    !token.includes('=') &&
+    !token.includes('+') &&
+    /^(?:@[a-z0-9_-]+\/[a-z0-9_.-]+|(?:src|lib|app|packages|components|modules|services|core|cli|docs|scripts)\/[A-Za-z0-9/_.-]+)$/.test(token)
+  ) {
     return true;
   }
   // Repeated sequence or single char repeated

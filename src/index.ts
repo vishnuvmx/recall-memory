@@ -1,8 +1,9 @@
 export { initProject } from './core/init.js';
 export { search } from './core/retrieval.js';
-export { loadAll, createMemory, rewriteMemory, updateMemory, findMemory } from './core/memory.js';
+export { loadAll, loadSearchableMemories, createMemory, rewriteMemory, updateMemory, findMemory } from './core/memory.js';
 export { findProject, requireInitialized } from './core/project.js';
 export { rebuildIndex } from './core/index-builder.js';
+export { syncAllAgentIntegrations, installAgentBlock } from './core/agent.js';
 export {
   remember,
   propose,
@@ -12,14 +13,30 @@ export {
   archiveAll,
   getProposals,
   context,
+  contextHybrid,
   status,
   log,
   map,
+  passport,
   checkpoint,
   prune,
   agentRemember,
   whereIs,
 } from './core/service.js';
+export {
+  syncPassport,
+  buildPassportMarkdown,
+  extractProjectIdentity,
+  loadFingerprint,
+  saveFingerprint,
+} from './core/passport.js';
+export {
+  syncWorkspace,
+  parseTranscriptTail,
+  extractDurableInsights,
+  processLifecycleHookInput,
+  runLifecycleHook,
+} from './core/chat-sync.js';
 export { seed } from './core/seed.js';
 export { generateProjectMap } from './core/mapper.js';
 export { recordCheckpoint, pruneSessions, pruneSessionLog } from './core/checkpoint.js';

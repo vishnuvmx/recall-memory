@@ -1,12 +1,17 @@
 #!/usr/bin/env node
+import fs from 'node:fs';
 import { Command, InvalidArgumentError } from 'commander';
+import { runLifecycleHook, syncWorkspace } from '../core/chat-sync.js';
 import { costReport } from '../core/cost.js';
 import { runDoctor } from '../core/doctor.js';
+import { formatHybridHitsCompact } from '../core/hybrid-retrieval.js';
 import { initProject } from '../core/init.js';
 import { rebuildIndex } from '../core/index-builder.js';
+import { loadSearchableMemories } from '../core/memory.js';
 import { formatHitsCompact } from '../core/retrieval.js';
-import { agentRemember, approve, approveAll, archive, archiveAll, checkpoint, context, getProposals, log, map, propose, prune, status, undo, whereIs } from '../core/service.js';
+import { agentRemember, approve, approveAll, archive, archiveAll, checkpoint, context, contextHybrid, getProposals, log, map, passport, propose, prune, status, undo, whereIs } from '../core/service.js';
 import { seed } from '../core/seed.js';
+import { getSharedSqliteStore } from '../core/sqlite-store.js';
 import { requireInitialized } from '../core/project.js';
 import { formatWhere } from '../core/where.js';
 import { MEMORY_TYPES, PROFILE_TIERS, type MemoryType, type ProfileTier } from '../schemas/index.js';
@@ -31,21 +36,24 @@ const program = new Command('recall')
 
 program
   .command('init')
-  .description('Create .recall/ and install the managed agent-instruction block (idempotent, never overwrites)')
+  .description('Create .recall/, non-volatile PASSPORT.md, and install managed agent instructions (idempotent)')
   .option('--no-agent', 'do not touch the agent instruction file')
+  .option('--all-agents', 'install bridges and lifecycle hooks for Antigravity, Claude Code, Cursor, Windsurf, and Copilot')
   .option('--profile <tier>', `model context tier (${PROFILE_TIERS.join('|')})`, 'standard')
-  .action((o: { agent: boolean; profile: string }) => {
+  .action((o: { agent: boolean; allAgents?: boolean; profile: string }) => {
     if (!PROFILE_TIERS.includes(o.profile as ProfileTier)) {
       throw new InvalidArgumentError(`--profile must be one of: ${PROFILE_TIERS.join(', ')}`);
     }
-    const r = initProject(cwd(), { agent: o.agent, profile: o.profile as ProfileTier });
+    const r = initProject(cwd(), { agent: o.agent, allAgents: o.allAgents, profile: o.profile as ProfileTier });
     print(`Project root: ${r.project.root} (${r.project.source === 'cwd' ? 'no Git repo or .recall found; using current directory' : `found via ${r.project.source}`})`);
     for (const f of r.created) print(`  created  ${f}`);
     for (const f of r.skipped) print(`  kept     ${f}`);
     print(`Agent instructions: ${r.agent}`);
-    print('\nDone. Agents now look things up and record learnings on their own; no further commands needed.');
-    print('Run `recall cost` to see exactly what Recall adds to your agent context.');
-    print('Nothing was staged or committed. Review with `git status`, then commit when ready.');
+    if (r.agentsSynced && r.agentsSynced.length > 0) {
+      print(`Multi-model integrations synced: ${r.agentsSynced.join(', ')}`);
+    }
+    print('\nDone. Any AI model can read `.recall/PASSPORT.md` for zero-cold-run context, and hooks sync normal chats automatically.');
+    print('Run `recall cost` to see exact token footprint. Nothing was staged or committed.');
   });
 
 program
@@ -195,7 +203,7 @@ program
       workspaceId: o.workspace || 'default',
       projectId: 'default',
     } : undefined;
-    const hits = context(cwd(), task, {
+    const queryOpts = {
       limit: o.limit,
       type: o.type,
       tag: o.tag,
@@ -203,7 +211,15 @@ program
       includeArchived: !!o.includeArchived,
       hybrid: o.hybrid,
       securityContext: secContext,
-    });
+    };
+
+    if (o.hybrid !== false && !o.verbose && o.format === 'text') {
+      const hybridHits = contextHybrid(cwd(), task, queryOpts);
+      print(formatHybridHitsCompact(hybridHits));
+      return;
+    }
+
+    const hits = context(cwd(), task, queryOpts);
 
     if (o.format === 'json') {
       print(JSON.stringify(hits.map((h) => ({
@@ -335,11 +351,17 @@ program
 
 program
   .command('rebuild')
-  .description('Rebuild INDEX.md deterministically from valid memory files')
+  .description('Rebuild INDEX.md, SQLite search cache, and PASSPORT.md deterministically from valid memory files')
   .action(() => {
     const p = requireInitialized(cwd());
     const l = rebuildIndex(p.recallDir);
-    print(`Index rebuilt: ${l.memories.length} memories, ${l.plainDocs.length} rule documents.`);
+    try {
+      getSharedSqliteStore(p.recallDir).ensureSynced(loadSearchableMemories(p.recallDir));
+    } catch {
+      // Fallback cleanly if node:sqlite unavailable
+    }
+    const pass = passport(cwd(), { force: true });
+    print(`Index & Passport rebuilt: ${l.memories.length} memories, ${l.plainDocs.length} rule documents (~${pass.tokensEstimate} passport tokens).`);
     for (const pr of l.problems) print(`  skipped (malformed, not deleted): ${pr.file} - ${pr.error}`);
   });
 
@@ -418,6 +440,67 @@ program
   });
 
 program
+  .command('passport')
+  .description('Generate or verify .recall/PASSPORT.md non-volatile blueprint (skips cold analysis if unchanged)')
+  .option('--profile <tier>', `context tier (${PROFILE_TIERS.join('|')})`)
+  .option('-f, --force', 'force regenerate even when non-volatile fingerprint is unchanged')
+  .option('--print', 'print PASSPORT.md contents to stdout')
+  .action((o: { profile?: string; force?: boolean; print?: boolean }) => {
+    if (o.profile && !PROFILE_TIERS.includes(o.profile as ProfileTier)) {
+      throw new InvalidArgumentError(`--profile must be one of: ${PROFILE_TIERS.join(', ')}`);
+    }
+    const res = passport(cwd(), { profile: o.profile as ProfileTier | undefined, force: o.force });
+    if (o.print) {
+      print(fs.readFileSync(res.file, 'utf8'));
+      return;
+    }
+    print(
+      res.updated
+        ? `Passport updated: ${res.file} (~${res.tokensEstimate} tokens)`
+        : `Passport up to date (0 cold re-analysis needed): ${res.file} (~${res.tokensEstimate} tokens)`,
+    );
+  });
+
+program
+  .command('sync')
+  .description('Incrementally sync non-volatile PASSPORT.md, SQLite index, map, and optional local chat transcript/note')
+  .option('-f, --force', 'force full rebuild even when content fingerprints match')
+  .option('--transcript <path>', 'local AI chat transcript (.jsonl, .json, or .md) to ingest')
+  .option('--note <text>', 'chat summary or durable insight text to process locally')
+  .option('--model <name>', 'AI model name for cross-model session continuity')
+  .option('--all-agents', 'sync instructions & lifecycle hooks across Antigravity, Claude Code, Cursor, Windsurf, Copilot')
+  .action((o: { force?: boolean; transcript?: string; note?: string; model?: string; allAgents?: boolean }) => {
+    requireInitialized(cwd());
+    const rep = syncWorkspace(cwd(), {
+      force: o.force,
+      transcriptPath: o.transcript,
+      note: o.note,
+      model: o.model,
+      allAgents: o.allAgents,
+    });
+    print(`Synced ${rep.root}:`);
+    print(`  PASSPORT.md:  ${rep.passportUpdated ? 'updated' : 'up to date (cached, 0 re-analysis)'}`);
+    print(`  PROJECT_MAP:  ${rep.mapUpdated ? 'updated' : 'up to date (cached)'}`);
+    print(`  INDEX.md:     ${rep.indexRebuilt ? 'rebuilt' : 'up to date'}`);
+    print(`  SQLite store: ${rep.sqliteSynced ? 'synced' : 'up to date'}`);
+    if (rep.chatCheckpointRecorded) print('  Chat state:   recorded to CURRENT_STATE.md & session-log.md');
+    for (const ins of rep.insightsSaved) {
+      print(`  Learned [${ins.type}]: ${ins.id} "${ins.title}" (${ins.action})`);
+    }
+    if (rep.agentsSynced) {
+      print(`  Agent hooks:  ${rep.agentsSynced.join(', ')}`);
+    }
+  });
+
+program
+  .command('hook')
+  .description('Universal agent lifecycle hook (reads stdin JSON from Antigravity, Claude Code, Cursor, or chat pipe)')
+  .action(async () => {
+    const out = await runLifecycleHook(cwd());
+    print(out);
+  });
+
+program
   .command('checkpoint')
   .alias('session')
   .description('Record an iteration checkpoint in .recall/CURRENT_STATE.md and the session log (normally run by the agent Stop hook)')
@@ -425,26 +508,24 @@ program
   .option('-n, --next <steps>', 'immediate next steps for following prompts (only if work remains half-done)')
   .option('--clear', 'clear active state and mark all previous work as completed')
   .option('--auto', 'auto-generate summary from git changes; skipped when nothing changed')
-  .option('--hook', 'agent lifecycle hook mode: auto checkpoint, print `{}` (hook JSON), never fail')
+  .option('--hook', 'agent lifecycle hook mode: process stdin chat/transcript, incrementally sync, output hook JSON')
+  .option('--model <name>', 'AI model name associated with this checkpoint')
   .option('--retention <days>', 'retention window in days for session log history (default: 14)')
-  .action((summary: string | undefined, o: { next?: string; clear?: boolean; auto?: boolean; hook?: boolean; retention?: string }) => {
+  .action(async (summary: string | undefined, o: { next?: string; clear?: boolean; auto?: boolean; hook?: boolean; model?: string; retention?: string }) => {
     if (o.hook) {
-      try {
-        checkpoint(cwd(), undefined, { auto: true });
-      } catch {
-        // A memory bookkeeping failure must never block or break the agent loop.
-      }
-      print('{}');
+      const out = await runLifecycleHook(cwd());
+      print(out);
       return;
     }
     const retentionDays = o.retention ? parseInt(o.retention, 10) : undefined;
-    const res = checkpoint(cwd(), summary, { nextSteps: o.next, clear: o.clear, auto: o.auto, retentionDays });
+    const res = checkpoint(cwd(), summary, { nextSteps: o.next, clear: o.clear, auto: o.auto, model: o.model, retentionDays });
     if (res.skipped) {
       print('No changes since the last checkpoint; nothing recorded.');
       return;
     }
     print(`Checkpoint recorded [${res.timestamp}]:`);
     print(`  Summary: ${res.summary}`);
+    if (res.model) print(`  Model:   ${res.model}`);
     if (res.nextSteps) print(`  Next:    ${res.nextSteps}`);
     if (res.modifiedFiles.length > 0) {
       print(`  Active files (${res.modifiedFiles.length}):`);

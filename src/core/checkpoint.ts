@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.js';
 import { repoChanges } from './git.js';
+import { redactSecrets } from '../security/secrets.js';
 import { atomicWrite, resolveInside, today } from '../utils/fs.js';
 
 export interface CheckpointOptions {
@@ -10,6 +11,8 @@ export interface CheckpointOptions {
   auto?: boolean;
   retentionDays?: number;
   maxEntries?: number;
+  model?: string;
+  referencedFiles?: string[];
 }
 
 export interface CheckpointResult {
@@ -17,6 +20,8 @@ export interface CheckpointResult {
   summary: string;
   nextSteps?: string;
   modifiedFiles: string[];
+  referencedFiles?: string[];
+  model?: string;
   /** True when an auto checkpoint was skipped because nothing changed since the last one. */
   skipped?: boolean;
 }
@@ -171,7 +176,7 @@ export function buildCurrentStateMarkdown(result: CheckpointResult): string {
   const lines: string[] = [
     '# Previous Iteration State (Historical Context Only)',
     '',
-    `> **Last Updated**: ${result.timestamp}`,
+    `> **Last Updated**: ${result.timestamp}${result.model ? ` · **Model**: ${result.model}` : ''}`,
     '> **AI AGENTS**: This records what happened in the PREVIOUS session. DO NOT execute these files or next steps unless the user explicitly asks to continue that specific work. Always prioritize the user\'s current prompt.',
     '',
     '## Previous Progress',
@@ -188,6 +193,12 @@ export function buildCurrentStateMarkdown(result: CheckpointResult): string {
     lines.push('_Working directory clean or no uncommitted changes._');
   } else {
     for (const file of result.modifiedFiles) {
+      lines.push(`- \`${file}\``);
+    }
+  }
+  if (result.referencedFiles && result.referencedFiles.length > 0) {
+    lines.push('', '## Files Discussed / Referenced in Chat');
+    for (const file of result.referencedFiles.slice(0, 10)) {
       lines.push(`- \`${file}\``);
     }
   }
@@ -208,7 +219,7 @@ export function recordCheckpoint(
   let cleanSummary = summary?.trim();
   if (opts.clear) {
     cleanSummary = 'Previous task completed. Ready for new instructions.';
-  } else if (!cleanSummary || cleanSummary === 'Task checkpoint' || opts.auto) {
+  } else if (!cleanSummary || cleanSummary === 'Task checkpoint') {
     if (modifiedFiles.length > 0) {
       const sample = modifiedFiles.slice(0, 3).join(', ');
       const extra = modifiedFiles.length > 3 ? ` (+${modifiedFiles.length - 3} more)` : '';
@@ -218,27 +229,37 @@ export function recordCheckpoint(
     }
   }
 
+  cleanSummary = redactSecrets(cleanSummary).redacted;
+  const safeNextSteps = opts.clear || !opts.nextSteps?.trim()
+    ? undefined
+    : redactSecrets(opts.nextSteps.trim()).redacted;
+
   const timestamp = getCurrentTimestamp();
 
   const sessionLogDir = path.join(recallDir, 'sessions');
   const logFile = path.join(sessionLogDir, 'session-log.md');
   const existingRaw = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
 
-  // The Stop hook fires after every agent turn; don't log a new entry when nothing changed.
+  // The Stop hook fires after every agent turn; don't log a duplicate entry when summary + files match.
   if (opts.auto && !opts.clear) {
     const last = parseSessionLogEntries(existingRaw).at(-1);
     const lastFiles = last?.modifiedFiles ?? [];
-    const same = lastFiles.length === modifiedFiles.length && lastFiles.every((f, i) => f === modifiedFiles[i]);
-    if (last && same && last.summary.startsWith('Session ')) {
+    const sameFiles = lastFiles.length === modifiedFiles.length && lastFiles.every((f, i) => f === modifiedFiles[i]);
+    const sameSummary = last?.summary === cleanSummary || (!summary?.trim() && last?.summary.startsWith('Session '));
+    if (last && sameFiles && sameSummary) {
       return { timestamp: last.timestamp, summary: last.summary, modifiedFiles, skipped: true };
     }
   }
 
+  const referenced = (opts.referencedFiles ?? []).filter((f) => !modifiedFiles.includes(f)).slice(0, 10);
+
   const result: CheckpointResult = {
     timestamp,
     summary: cleanSummary,
-    nextSteps: opts.clear ? undefined : opts.nextSteps?.trim(),
+    nextSteps: safeNextSteps,
     modifiedFiles,
+    ...(referenced.length > 0 ? { referencedFiles: referenced } : {}),
+    ...(opts.model ? { model: opts.model } : {}),
   };
 
   const currentStateFile = resolveInside(recallDir, 'CURRENT_STATE.md');
@@ -250,11 +271,16 @@ export function recordCheckpoint(
     `### [${timestamp}] Checkpoint`,
     `- **Summary**: ${cleanSummary}`,
   ];
+  if (opts.model) {
+    entryLines.push(`- **Model**: ${opts.model}`);
+  }
   if (result.nextSteps) {
     entryLines.push(`- **Next**: ${result.nextSteps}`);
   }
   if (modifiedFiles.length > 0) {
     entryLines.push(`- **Modified**: ${modifiedFiles.join(', ')}`);
+  } else if (referenced.length > 0) {
+    entryLines.push(`- **Referenced**: ${referenced.join(', ')}`);
   }
   const logEntry = `${entryLines.join('\n')}\n\n`;
 

@@ -1,11 +1,44 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import type { Memory } from './memory.js';
 import { globalWriteQueue, withRetry } from './write-queue.js';
 import { getOrGenerateEmbedding, CURRENT_EMBEDDING_MODEL, CURRENT_EMBEDDING_VERSION } from './embeddings.js';
 import type { SecurityContext } from '../security/isolation.js';
 import { canReadResource } from '../security/isolation.js';
+
+const require = createRequire(import.meta.url);
+let cachedDatabaseSync: typeof DatabaseSyncType | null | undefined;
+let sqliteWarningFiltered = false;
+
+function installSqliteWarningFilter(): void {
+  if (sqliteWarningFiltered) return;
+  sqliteWarningFiltered = true;
+  const origEmit = process.emitWarning.bind(process);
+  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
+    const msg = typeof warning === 'string' ? warning : warning?.message ?? '';
+    if (msg.includes('SQLite is an experimental feature')) return;
+    return (origEmit as (...a: unknown[]) => void)(warning, ...args);
+  }) as typeof process.emitWarning;
+}
+
+function getDatabaseSyncCtor(): typeof DatabaseSyncType {
+  if (cachedDatabaseSync === undefined) {
+    installSqliteWarningFilter();
+    try {
+      const mod = require('node:sqlite') as { DatabaseSync: typeof DatabaseSyncType };
+      cachedDatabaseSync = mod.DatabaseSync;
+    } catch {
+      cachedDatabaseSync = null;
+    }
+  }
+  if (!cachedDatabaseSync) {
+    throw new Error('node:sqlite is unavailable in this Node.js runtime (requires Node >= 22.5).');
+  }
+  return cachedDatabaseSync;
+}
 
 export interface DbMemoryRow {
   id: string;
@@ -35,15 +68,16 @@ export interface DbMemoryRow {
 }
 
 export class SqliteMemoryStore {
-  private db: DatabaseSync;
+  private db: DatabaseSyncType;
   private isClosed = false;
 
   constructor(dbPath: string) {
+    const DatabaseSyncCtor = getDatabaseSyncCtor();
     if (dbPath !== ':memory:') {
       fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     }
 
-    this.db = new DatabaseSync(dbPath);
+    this.db = new DatabaseSyncCtor(dbPath);
     this.initPragmas();
     this.initSchema();
   }
@@ -108,6 +142,11 @@ export class SqliteMemoryStore {
         content_hash TEXT NOT NULL,
         vector TEXT NOT NULL,
         updated TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS recall_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
     `);
   }
@@ -385,6 +424,32 @@ export class SqliteMemoryStore {
     for (const m of memories) {
       this.upsertMemorySync(m);
     }
+
+    const digest = computeMemoriesDigest(memories);
+    this.setMeta('sync_hash', digest);
+  }
+
+  /**
+   * Fast O(N) digest check: syncs SQLite FTS5 & embeddings from Markdown ONLY when records changed.
+   * Returns true if a sync was performed, false if already up to date.
+   */
+  ensureSynced(memories: Memory[]): boolean {
+    const digest = computeMemoriesDigest(memories);
+    const current = this.getMeta('sync_hash');
+    if (current === digest) return false;
+    this.syncFromMarkdown(memories);
+    return true;
+  }
+
+  getMeta(key: string): string | undefined {
+    const row = this.db.prepare('SELECT value FROM recall_meta WHERE key = ?;').get(key) as { value: string } | undefined;
+    return row?.value;
+  }
+
+  setMeta(key: string, value: string): void {
+    this.db
+      .prepare('INSERT INTO recall_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value;')
+      .run(key, value);
   }
 
   close(): void {
@@ -395,18 +460,38 @@ export class SqliteMemoryStore {
   }
 }
 
-let sharedStore: SqliteMemoryStore | null = null;
-
-export function getSharedSqliteStore(recallDir: string): SqliteMemoryStore {
-  if (sharedStore) return sharedStore;
-  const dbPath = path.join(recallDir, '.cache', 'recall.db');
-  sharedStore = new SqliteMemoryStore(dbPath);
-  return sharedStore;
+export function computeMemoriesDigest(memories: Memory[]): string {
+  const h = crypto.createHash('sha256');
+  for (const m of memories) {
+    h.update(`${m.id}\0${m.title}\0${m.type}\0${m.status}\0${m.updated}\0${m.version ?? 1}\0${m.tags.join(',')}\0${m.body}\n`);
+  }
+  return h.digest('hex');
 }
 
-export function closeSharedSqliteStore(): void {
-  if (sharedStore) {
-    sharedStore.close();
-    sharedStore = null;
+const sharedStores = new Map<string, SqliteMemoryStore>();
+
+export function getSharedSqliteStore(recallDir: string): SqliteMemoryStore {
+  const key = path.resolve(recallDir);
+  const existing = sharedStores.get(key);
+  if (existing) return existing;
+  const dbPath = path.join(key, '.cache', 'recall.db');
+  const store = new SqliteMemoryStore(dbPath);
+  sharedStores.set(key, store);
+  return store;
+}
+
+export function closeSharedSqliteStore(recallDir?: string): void {
+  if (recallDir) {
+    const key = path.resolve(recallDir);
+    const store = sharedStores.get(key);
+    if (store) {
+      store.close();
+      sharedStores.delete(key);
+    }
+    return;
   }
+  for (const store of sharedStores.values()) {
+    store.close();
+  }
+  sharedStores.clear();
 }

@@ -38,10 +38,11 @@ export function runDoctor(start: string): Check[] {
     const ok = fs.existsSync(path.join(p.recallDir, d));
     if (!ok) add(`directory ${d}/`, false, 'missing', `Run \`recall init\` (safe to repeat) or mkdir .recall/${d}`);
   }
-  for (const f of ['MEMORY.md', 'INDEX.md', 'PROJECT_MAP.md', 'CURRENT_STATE.md']) {
+  for (const f of ['PASSPORT.md', 'MEMORY.md', 'INDEX.md', 'PROJECT_MAP.md', 'CURRENT_STATE.md']) {
     const ok = fs.existsSync(path.join(p.recallDir, f));
     if (!ok) {
       let fix = 'Run `recall init`.';
+      if (f === 'PASSPORT.md') fix = 'Run `recall passport` or `recall sync`.';
       if (f === 'INDEX.md') fix = 'Run `recall rebuild`.';
       if (f === 'PROJECT_MAP.md') fix = 'Run `recall map`.';
       add(f, false, 'missing', fix);

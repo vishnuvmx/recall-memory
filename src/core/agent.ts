@@ -108,6 +108,134 @@ function syncHook(agentsDir: string): void {
   writeIfChanged(hooksPath, `${JSON.stringify(hooks, null, 2)}\n`);
 }
 
+function syncClaudeHook(root: string, createMissing = false): boolean {
+  try {
+    const claudeDir = resolveInside(root, '.claude');
+    if (!createMissing && !fs.existsSync(claudeDir)) return false;
+    fs.mkdirSync(claudeDir, { recursive: true });
+
+    // Prefer settings.json if already present, otherwise settings.local.json
+    const settingsPath = fs.existsSync(path.join(claudeDir, 'settings.json'))
+      ? path.join(claudeDir, 'settings.json')
+      : path.join(claudeDir, 'settings.local.json');
+
+    let settings: Record<string, unknown> = {};
+    if (fs.existsSync(settingsPath)) {
+      try {
+        settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+      } catch {
+        return false; // never clobber hand-edited settings we cannot parse
+      }
+    }
+
+    const hooksObj = (settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {}) as Record<string, unknown>;
+    const stopArr = Array.isArray(hooksObj.Stop) ? (hooksObj.Stop as Array<Record<string, unknown>>) : [];
+    const alreadyInstalled = stopArr.some((entry) => {
+      const inner = Array.isArray(entry?.hooks) ? (entry.hooks as Array<{ command?: string }>) : [];
+      return inner.some((h) => h.command === HOOK_COMMAND);
+    });
+
+    if (!alreadyInstalled) {
+      stopArr.push({
+        hooks: [{ type: 'command', command: HOOK_COMMAND, timeout: 15 }],
+      });
+    }
+    hooksObj.Stop = stopArr;
+    settings.hooks = hooksObj;
+    writeIfChanged(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function syncCursorHook(root: string, createMissing = false): boolean {
+  try {
+    const cursorDir = resolveInside(root, '.cursor');
+    if (!createMissing && !fs.existsSync(cursorDir)) return false;
+    fs.mkdirSync(cursorDir, { recursive: true });
+    const hooksPath = path.join(cursorDir, 'hooks.json');
+    let parsed: Record<string, unknown> = { version: 1, hooks: {} };
+    if (fs.existsSync(hooksPath)) {
+      try {
+        parsed = JSON.parse(fs.readFileSync(hooksPath, 'utf8')) as Record<string, unknown>;
+      } catch {
+        return false;
+      }
+    }
+    if (!parsed.version) parsed.version = 1;
+    const hooksObj = (parsed.hooks && typeof parsed.hooks === 'object' ? parsed.hooks : {}) as Record<string, unknown>;
+    const stopList = Array.isArray(hooksObj.stop) ? (hooksObj.stop as Array<{ command?: string }>) : [];
+    if (!stopList.some((h) => h.command === HOOK_COMMAND)) {
+      stopList.push({ command: HOOK_COMMAND });
+    }
+    hooksObj.stop = stopList;
+    parsed.hooks = hooksObj;
+    writeIfChanged(hooksPath, `${JSON.stringify(parsed, null, 2)}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Synchronizes instructions and Stop hooks across all AI coding agents so switching models
+ * never loses context or forgets to checkpoint normal chats.
+ */
+export function syncAllAgentIntegrations(
+  root: string,
+  opts: { agentFile?: string; createMissing?: boolean } = {},
+): string[] {
+  const agentFile = opts.agentFile ?? 'AGENTS.md';
+  const createMissing = !!opts.createMissing;
+  const synced: string[] = [];
+
+  // 1. Primary instruction file (AGENTS.md is natively read by Antigravity, Codex, Cursor, Windsurf, Cline, Aider, Zed)
+  installAgentBlock(root, agentFile);
+  synced.push(agentFile);
+
+  // 2. Antigravity (.agents/skills + .agents/hooks.json)
+  syncAntigravitySupport(root, agentFile);
+  synced.push('.agents/hooks.json');
+
+  // 3. Claude Code (CLAUDE.md + .claude Stop hook)
+  try {
+    const claudeMd = resolveInside(root, 'CLAUDE.md');
+    if (createMissing && !fs.existsSync(claudeMd) && agentFile === 'AGENTS.md') {
+      atomicWrite(claudeMd, '@AGENTS.md\n');
+      synced.push('CLAUDE.md');
+    } else if (fs.existsSync(claudeMd)) {
+      syncClaudeBridge(root, agentFile);
+      synced.push('CLAUDE.md');
+    }
+  } catch {
+    // ignore
+  }
+  if (syncClaudeHook(root, createMissing)) {
+    synced.push('.claude/hooks');
+  }
+
+  // 4. Cursor (.cursor/hooks.json)
+  if (syncCursorHook(root, createMissing)) {
+    synced.push('.cursor/hooks.json');
+  }
+
+  // 5. Windsurf & GitHub Copilot instruction bridges (only if present or createMissing)
+  for (const extraFile of ['.windsurfrules', '.github/copilot-instructions.md']) {
+    try {
+      const p = resolveInside(root, ...extraFile.split('/'));
+      if (!createMissing && !fs.existsSync(p)) continue;
+      const before = fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
+      writeIfChanged(p, applyManagedBlock(before, AGENT_BLOCK));
+      synced.push(extraFile);
+    } catch {
+      // ignore
+    }
+  }
+
+  return synced;
+}
+
 /**
  * Antigravity integration: static content only. Nothing here depends on session state, so repeated
  * calls are byte-stable and never invalidate prompt caches.
@@ -131,6 +259,8 @@ export function installAgentBlock(root: string, agentFile: string): 'created' | 
   const after = applyManagedBlock(before, AGENT_BLOCK);
   if (existed && before === after) {
     syncClaudeBridge(root, agentFile);
+    syncClaudeHook(root, false);
+    syncCursorHook(root, false);
     syncAntigravitySupport(root, agentFile);
     return 'unchanged';
   }
@@ -139,6 +269,8 @@ export function installAgentBlock(root: string, agentFile: string): 'created' | 
   }
   atomicWrite(file, after);
   syncClaudeBridge(root, agentFile);
+  syncClaudeHook(root, false);
+  syncCursorHook(root, false);
   syncAntigravitySupport(root, agentFile);
   return existed ? 'updated' : 'created';
 }

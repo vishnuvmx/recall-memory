@@ -83,6 +83,7 @@ export function costReport(start: string): CostReport {
     if (t !== null) onDemand.push({ source: `.recall/${rel}`, tokens: estimateTokens(t), note });
   };
   if (skillText) onDemand.push({ source: 'skill body', tokens: estimateTokens(skillText) - estimateTokens(skillDesc), note: 'loaded when the agent picks the skill' });
+  addFile('PASSPORT.md', 'non-volatile blueprint; read once per new chat');
   onDemand.push({ source: '`recall context` response', tokens: 400, note: 'hard cap' });
   addFile('CURRENT_STATE.md', 'read only for continue/resume');
   addFile('PROJECT_MAP.md', 'for humans; agents use `recall where`');

@@ -8,6 +8,7 @@ export interface Landmark {
   name: string;
   kind: 'class' | 'method' | 'function' | 'section' | 'interface' | 'type';
   line: number;
+  exported?: boolean;
 }
 
 export interface FileLandmarks {
@@ -46,7 +47,9 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
 
   for (let i = 0; i < lines.length; i++) {
     const lineNum = i + 1;
-    const line = lines[i]!.trim();
+    const rawLine = lines[i]!;
+    const indent = rawLine.length - rawLine.trimStart().length;
+    const line = rawLine.trim();
     if (!line || line.startsWith('//') || line.startsWith('/*') || line.startsWith('*')) {
       // Check for explicit section comments (e.g. // MARK: or // ===)
       if (line.includes('MARK:') || line.startsWith('// ===') || line.startsWith('// ---') || line.includes('SECTION:')) {
@@ -62,7 +65,8 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
       // Classes
       const classMatch = /^(?:abstract\s+)?class\s+([A-Za-z0-9_]+)/.exec(line);
       if (classMatch) {
-        landmarks.push({ name: classMatch[1]!, kind: 'class', line: lineNum });
+        const name = classMatch[1]!;
+        landmarks.push({ name, kind: 'class', line: lineNum, exported: !name.startsWith('_') });
         continue;
       }
       // Methods / Functions
@@ -70,44 +74,49 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
       if (methodMatch) {
         const name = methodMatch[1]!;
         if (!['if', 'for', 'while', 'switch', 'catch', 'when', 'assert', 'setState'].includes(name)) {
-          landmarks.push({ name, kind: 'method', line: lineNum });
+          landmarks.push({ name, kind: 'method', line: lineNum, exported: indent === 0 && !name.startsWith('_') });
         }
       }
     } else if (ext === '.ts' || ext === '.tsx' || ext === '.js' || ext === '.jsx') {
+      const isExported = line.startsWith('export ');
       // Classes
       const classMatch = /^(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z0-9_]+)/.exec(line);
       if (classMatch) {
-        landmarks.push({ name: classMatch[1]!, kind: 'class', line: lineNum });
+        landmarks.push({ name: classMatch[1]!, kind: 'class', line: lineNum, exported: isExported });
         continue;
       }
       // Interfaces
       const ifaceMatch = /^(?:export\s+)?interface\s+([A-Za-z0-9_]+)/.exec(line);
       if (ifaceMatch) {
-        landmarks.push({ name: ifaceMatch[1]!, kind: 'interface', line: lineNum });
+        landmarks.push({ name: ifaceMatch[1]!, kind: 'interface', line: lineNum, exported: isExported });
         continue;
       }
       // Types
       const typeMatch = /^(?:export\s+)?type\s+([A-Za-z0-9_]+)\s*(?:<[^=]+>)?\s*=/.exec(line);
       if (typeMatch) {
-        landmarks.push({ name: typeMatch[1]!, kind: 'type', line: lineNum });
+        landmarks.push({ name: typeMatch[1]!, kind: 'type', line: lineNum, exported: isExported });
         continue;
       }
-      // Functions / Arrow functions / Methods
+      // Functions / Arrow functions (skip nested inner helper functions when indented and unexported)
       const fnMatch = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function(?:\s*\*|\s+([A-Za-z0-9_]+))\s*(?:\(|<)/.exec(line);
       if (fnMatch && fnMatch[1]) {
-        landmarks.push({ name: fnMatch[1]!, kind: 'function', line: lineNum });
+        if (isExported || indent === 0) {
+          landmarks.push({ name: fnMatch[1]!, kind: 'function', line: lineNum, exported: isExported });
+        }
         continue;
       }
       const constFnMatch = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_]+)\s*(?::\s*[^=]+)?\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>/.exec(line);
       if (constFnMatch) {
-        landmarks.push({ name: constFnMatch[1]!, kind: 'function', line: lineNum });
+        if (isExported || indent === 0) {
+          landmarks.push({ name: constFnMatch[1]!, kind: 'function', line: lineNum, exported: isExported });
+        }
         continue;
       }
-      const methodMatch = /^\s*(?:(?:public|private|protected|static|async|\*|override|readonly)\s+)+([a-zA-Z0-9_]+)\s*(?:<[^>]+>)?\s*\([^)]*\)\s*(?::\s*[^{]+)?\{/.exec(line);
-      if (methodMatch) {
+      const methodMatch = /^(?:(?:public|private|protected|static|async|\*|override|readonly)\s+)+([a-zA-Z0-9_]+)\s*(?:<[^>]+>)?\s*\([^)]*\)\s*(?::\s*[^{]+)?\{/.exec(line);
+      if (methodMatch && indent <= 4) {
         const name = methodMatch[1]!;
         if (!['if', 'for', 'while', 'switch', 'catch', 'constructor'].includes(name)) {
-          landmarks.push({ name, kind: 'method', line: lineNum });
+          landmarks.push({ name, kind: 'method', line: lineNum, exported: false });
         }
       }
     } else if (ext === '.kt') {
@@ -216,7 +225,11 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
   return landmarks;
 }
 
+const LANDMARK_CACHE_VERSION = 2;
+
 interface CacheRecord {
+  v?: number;
+  size?: number;
   mtimeMs: number;
   totalLines: number;
   landmarks: Landmark[];
@@ -233,6 +246,7 @@ export function scanLandmarks(
   recallDir?: string,
 ): FileLandmarks[] {
   const results: FileLandmarks[] = [];
+  const seenFiles = new Set<string>();
   const isGitignored = createGitignoreFilter(root);
 
   // Load MTime cache if recallDir is provided
@@ -277,19 +291,20 @@ export function scanLandmarks(
           const fullPath = path.join(currentDir, entry.name);
           const stat = fs.statSync(fullPath);
           if (stat.size > 2 * 1024 * 1024) continue; // skip files > 2 MB
+          seenFiles.add(rel);
 
           let linesCount = 0;
           let landmarks: Landmark[] = [];
 
           const cached = cache[rel];
-          if (cached && cached.mtimeMs === stat.mtimeMs) {
+          if (cached && cached.v === LANDMARK_CACHE_VERSION && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
             linesCount = cached.totalLines;
             landmarks = cached.landmarks;
           } else {
             const content = fs.readFileSync(fullPath, 'utf8');
             linesCount = content.split('\n').length;
             landmarks = extractLandmarks(content, ext);
-            cache[rel] = { mtimeMs: stat.mtimeMs, totalLines: linesCount, landmarks };
+            cache[rel] = { v: LANDMARK_CACHE_VERSION, size: stat.size, mtimeMs: stat.mtimeMs, totalLines: linesCount, landmarks };
             cacheDirty = true;
           }
 
@@ -308,6 +323,14 @@ export function scanLandmarks(
   }
 
   walk(root);
+
+  // Evict deleted or newly ignored files from landmark cache
+  for (const key of Object.keys(cache)) {
+    if (!seenFiles.has(key)) {
+      delete cache[key];
+      cacheDirty = true;
+    }
+  }
 
   // Write updated cache if dirty
   if (recallDir && cacheDirty) {
