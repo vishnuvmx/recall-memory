@@ -17,7 +17,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/vishnuvmx/recall-memory.git"
+    "url": "git+https://github.com/vishnuvmx/recall-memory.git"
   },
   "homepage": "https://github.com/vishnuvmx/recall-memory#readme",
   "bugs": {
