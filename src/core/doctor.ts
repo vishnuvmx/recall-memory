@@ -51,6 +51,16 @@ export function runDoctor(start: string): Check[] {
   const loaded = loadAll(p.recallDir);
   if (loaded.problems.length === 0) add('memory files', true, `${loaded.memories.length} valid memories`);
   for (const pr of loaded.problems) add(`memory ${pr.file}`, false, pr.error, 'Edit the file to fix its frontmatter. Recall will not delete it.');
+  if (!loaded.staleFileRefs || loaded.staleFileRefs.length === 0) {
+    add('memory file references', true, 'all referenced repo paths exist');
+  } else {
+    add(
+      'memory file references',
+      false,
+      `missing on disk: ${loaded.staleFileRefs.join(', ')}`,
+      'Update or supersede memories that reference renamed/deleted files.',
+    );
+  }
   const state = indexState(p.recallDir);
   add('index', state === 'up_to_date', state, state === 'up_to_date' ? undefined : 'Run `recall rebuild`.');
   const broken = brokenIndexLinks(p.recallDir);

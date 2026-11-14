@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import type { Memory } from './memory.js';
+import { stemCandidates, tokenize } from './retrieval.js';
 import { globalWriteQueue, withRetry } from './write-queue.js';
 import { getOrGenerateEmbedding, CURRENT_EMBEDDING_MODEL, CURRENT_EMBEDDING_VERSION } from './embeddings.js';
 import type { SecurityContext } from '../security/isolation.js';
@@ -180,98 +181,7 @@ export class SqliteMemoryStore {
     };
   }
 
-  /**
-   * Upserts a memory synchronously inside a short transaction,
-   * guaranteeing read-after-write consistency.
-   */
-  upsertMemorySync(m: Memory): void {
-    const upsertStmt = this.db.prepare(`
-      INSERT INTO memories (
-        id, title, type, body, file, created, updated, status, verification,
-        confidence, evidence, valid_from, expires_at, version, superseded_by,
-        deprecated, deprecated_reason, tenant_id, workspace_id, project_id,
-        user_id, visibility, tags, sources
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        title = excluded.title,
-        type = excluded.type,
-        body = excluded.body,
-        file = excluded.file,
-        updated = excluded.updated,
-        status = excluded.status,
-        verification = excluded.verification,
-        confidence = excluded.confidence,
-        evidence = excluded.evidence,
-        valid_from = excluded.valid_from,
-        expires_at = excluded.expires_at,
-        version = excluded.version,
-        superseded_by = excluded.superseded_by,
-        deprecated = excluded.deprecated,
-        deprecated_reason = excluded.deprecated_reason,
-        tenant_id = excluded.tenant_id,
-        workspace_id = excluded.workspace_id,
-        project_id = excluded.project_id,
-        user_id = excluded.user_id,
-        visibility = excluded.visibility,
-        tags = excluded.tags,
-        sources = excluded.sources;
-    `);
-
-    const ftsDeleteStmt = this.db.prepare('DELETE FROM memories_fts WHERE id = ?;');
-    const ftsInsertStmt = this.db.prepare('INSERT INTO memories_fts (id, title, tags, body) VALUES (?, ?, ?, ?);');
-
-    // Run short transaction
-    this.db.exec('BEGIN IMMEDIATE;');
-    try {
-      upsertStmt.run(
-        m.id,
-        m.title,
-        m.type,
-        m.body,
-        m.file,
-        m.created,
-        m.updated,
-        m.status,
-        m.verification,
-        m.confidence ?? 1.0,
-        JSON.stringify(m.evidence ?? []),
-        m.validFrom ?? null,
-        m.expiresAt ?? null,
-        m.version ?? 1,
-        m.supersededBy ?? null,
-        m.deprecated ? 1 : 0,
-        m.deprecatedReason ?? null,
-        m.tenantId ?? 'default',
-        m.workspaceId ?? 'default',
-        m.projectId ?? 'default',
-        m.userId ?? null,
-        m.visibility ?? 'workspace',
-        JSON.stringify(m.tags ?? []),
-        JSON.stringify(m.sources ?? []),
-      );
-
-      ftsDeleteStmt.run(m.id);
-      ftsInsertStmt.run(m.id, m.title, (m.tags ?? []).join(' '), m.body);
-
-      this.db.exec('COMMIT;');
-    } catch (err) {
-      this.db.exec('ROLLBACK;');
-      throw err;
-    }
-
-    // Update embedding
-    this.updateEmbeddingSync(m);
-  }
-
-  async upsertMemory(m: Memory): Promise<void> {
-    return globalWriteQueue.enqueue(async () => {
-      await withRetry(() => {
-        this.upsertMemorySync(m);
-      });
-    });
-  }
-
-  private updateEmbeddingSync(m: Memory): void {
+  private updateEmbeddingInTx(m: Memory): void {
     const text = `${m.title}\n${(m.tags ?? []).join(' ')}\n${m.body}`;
     const emb = getOrGenerateEmbedding(text);
 
@@ -307,6 +217,97 @@ export class SqliteMemoryStore {
       JSON.stringify(emb.vector),
       new Date().toISOString(),
     );
+  }
+
+  private upsertMemoryRowInTx(m: Memory): void {
+    const upsertStmt = this.db.prepare(`
+      INSERT INTO memories (
+        id, title, type, body, file, created, updated, status, verification,
+        confidence, evidence, valid_from, expires_at, version, superseded_by,
+        deprecated, deprecated_reason, tenant_id, workspace_id, project_id,
+        user_id, visibility, tags, sources
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        type = excluded.type,
+        body = excluded.body,
+        file = excluded.file,
+        updated = excluded.updated,
+        status = excluded.status,
+        verification = excluded.verification,
+        confidence = excluded.confidence,
+        evidence = excluded.evidence,
+        valid_from = excluded.valid_from,
+        expires_at = excluded.expires_at,
+        version = excluded.version,
+        superseded_by = excluded.superseded_by,
+        deprecated = excluded.deprecated,
+        deprecated_reason = excluded.deprecated_reason,
+        tenant_id = excluded.tenant_id,
+        workspace_id = excluded.workspace_id,
+        project_id = excluded.project_id,
+        user_id = excluded.user_id,
+        visibility = excluded.visibility,
+        tags = excluded.tags,
+        sources = excluded.sources;
+    `);
+
+    const ftsDeleteStmt = this.db.prepare('DELETE FROM memories_fts WHERE id = ?;');
+    const ftsInsertStmt = this.db.prepare('INSERT INTO memories_fts (id, title, tags, body) VALUES (?, ?, ?, ?);');
+
+    upsertStmt.run(
+      m.id,
+      m.title,
+      m.type,
+      m.body,
+      m.file,
+      m.created,
+      m.updated,
+      m.status,
+      m.verification,
+      m.confidence ?? 1.0,
+      JSON.stringify(m.evidence ?? []),
+      m.validFrom ?? null,
+      m.expiresAt ?? null,
+      m.version ?? 1,
+      m.supersededBy ?? null,
+      m.deprecated ? 1 : 0,
+      m.deprecatedReason ?? null,
+      m.tenantId ?? 'default',
+      m.workspaceId ?? 'default',
+      m.projectId ?? 'default',
+      m.userId ?? null,
+      m.visibility ?? 'workspace',
+      JSON.stringify(m.tags ?? []),
+      JSON.stringify(m.sources ?? []),
+    );
+
+    ftsDeleteStmt.run(m.id);
+    ftsInsertStmt.run(m.id, m.title, (m.tags ?? []).join(' '), m.body);
+    this.updateEmbeddingInTx(m);
+  }
+
+  /**
+   * Upserts a memory synchronously inside a short transaction,
+   * guaranteeing read-after-write consistency.
+   */
+  upsertMemorySync(m: Memory): void {
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      this.upsertMemoryRowInTx(m);
+      this.db.exec('COMMIT;');
+    } catch (err) {
+      this.db.exec('ROLLBACK;');
+      throw err;
+    }
+  }
+
+  async upsertMemory(m: Memory): Promise<void> {
+    return globalWriteQueue.enqueue(async () => {
+      await withRetry(() => {
+        this.upsertMemorySync(m);
+      });
+    });
   }
 
   deleteMemorySync(id: string): void {
@@ -367,20 +368,26 @@ export class SqliteMemoryStore {
    * Returns matching memory IDs and their BM25 score.
    */
   ftsBm25Search(query: string, limit = 20): Array<{ id: string; bm25Score: number }> {
-    // Clean query for FTS5 syntax
-    const cleaned = query
-      .replace(/[^\p{L}\p{N}]+/gu, ' ')
-      .trim()
-      .split(/\s+/)
-      .filter((w) => w.length > 1)
-      .map((w) => `"${w}"*`)
-      .join(' OR ');
+    const tokens = tokenize(query);
+    if (tokens.length === 0) return [];
 
+    // Emit ONE canonical FTS5 clause per query token so bm25() never double-counts
+    // tokens that have multiple morphological stem candidates.
+    const clauses = new Set<string>();
+    for (const w of tokens) {
+      const stems = [w, ...stemCandidates(w)].filter((s) => s.length >= 4).sort((a, b) => a.length - b.length);
+      if (stems.length > 0) {
+        clauses.add(`"${stems[0]!}"*`);
+      } else {
+        clauses.add(`"${w}"`);
+      }
+    }
+    const cleaned = [...clauses].join(' OR ');
     if (!cleaned) return [];
 
     try {
       const stmt = this.db.prepare(`
-        SELECT id, bm25(memories_fts) as rank
+        SELECT id, bm25(memories_fts, 0.0, 5.0, 3.5, 1.0) as rank
         FROM memories_fts
         WHERE memories_fts MATCH ?
         ORDER BY rank
@@ -399,15 +406,25 @@ export class SqliteMemoryStore {
    * Synchronizes markdown memory records into SQLite store.
    */
   syncFromMarkdown(memories: Memory[]): void {
+    const digest = computeMemoriesDigest(memories);
     this.db.exec('BEGIN IMMEDIATE;');
     try {
-      const existingIds = new Set(
-        (this.db.prepare('SELECT id FROM memories;').all() as unknown as Array<{ id: string }>).map((r) => r.id),
-      );
+      const existingRows = this.db
+        .prepare('SELECT id, updated, version, status, title, body, tags FROM memories;')
+        .all() as unknown as Array<{
+        id: string;
+        updated: string;
+        version: number;
+        status: string;
+        title: string;
+        body: string;
+        tags: string;
+      }>;
+      const existingMap = new Map(existingRows.map((r) => [r.id, r]));
       const incomingIds = new Set(memories.map((m) => m.id));
 
       // Remove deleted
-      for (const id of existingIds) {
+      for (const id of existingMap.keys()) {
         if (!incomingIds.has(id)) {
           this.db.prepare('DELETE FROM memories WHERE id = ?;').run(id);
           this.db.prepare('DELETE FROM memories_fts WHERE id = ?;').run(id);
@@ -415,18 +432,54 @@ export class SqliteMemoryStore {
         }
       }
 
+      // Only upsert new or modified memories inside the same transaction
+      for (const m of memories) {
+        const prev = existingMap.get(m.id);
+        const tagsJson = JSON.stringify(m.tags ?? []);
+        if (
+          prev &&
+          prev.updated === m.updated &&
+          prev.version === (m.version ?? 1) &&
+          prev.status === m.status &&
+          prev.title === m.title &&
+          prev.body === m.body &&
+          prev.tags === tagsJson
+        ) {
+          continue;
+        }
+        this.upsertMemoryRowInTx(m);
+      }
+
+      this.setMeta('sync_hash', digest);
       this.db.exec('COMMIT;');
     } catch (err) {
       this.db.exec('ROLLBACK;');
       throw err;
     }
+  }
 
-    for (const m of memories) {
-      this.upsertMemorySync(m);
+  /**
+   * Incrementally syncs specific changed memories when the store is already initialized,
+   * avoiding a full table scan on single-memory writes.
+   */
+  syncChangedMemories(changed: Memory[], allMemories?: Memory[]): void {
+    if (!this.getMeta('sync_hash') && allMemories) {
+      this.syncFromMarkdown(allMemories);
+      return;
     }
-
-    const digest = computeMemoriesDigest(memories);
-    this.setMeta('sync_hash', digest);
+    this.db.exec('BEGIN IMMEDIATE;');
+    try {
+      for (const m of changed) {
+        this.upsertMemoryRowInTx(m);
+      }
+      if (allMemories) {
+        this.setMeta('sync_hash', computeMemoriesDigest(allMemories));
+      }
+      this.db.exec('COMMIT;');
+    } catch (err) {
+      this.db.exec('ROLLBACK;');
+      throw err;
+    }
   }
 
   /**

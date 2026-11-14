@@ -21,6 +21,7 @@ export interface CheckpointResult {
   nextSteps?: string;
   modifiedFiles: string[];
   referencedFiles?: string[];
+  activeFileMap?: string[];
   model?: string;
   /** True when an auto checkpoint was skipped because nothing changed since the last one. */
   skipped?: boolean;
@@ -172,6 +173,69 @@ export function pruneSessions(
   return { removedCount: res.removedCount, remainingCount: res.retained.length };
 }
 
+import * as fsNode from 'node:fs';
+import * as pathNode from 'node:path';
+
+const CODE_FILE_EXT_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|c|cpp|cs|rb|php)$/i;
+const CONTROL_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'typeof', 'delete', 'await', 'yield']);
+
+export function buildActiveFileSymbolMap(root: string, files: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const rootAbs = pathNode.resolve(root);
+
+  for (const rawFile of files) {
+    const rel = rawFile.replace(/\\/g, '/').trim();
+    if (!rel || seen.has(rel) || !CODE_FILE_EXT_RE.test(rel)) continue;
+    seen.add(rel);
+
+    const abs = pathNode.resolve(rootAbs, rel);
+    if (!abs.startsWith(rootAbs + pathNode.sep) && abs !== rootAbs) continue;
+    let content: string;
+    try {
+      const stat = fsNode.statSync(abs);
+      if (!stat.isFile() || stat.size > 256 * 1024) continue;
+      content = fsNode.readFileSync(abs, 'utf8');
+    } catch {
+      continue;
+    }
+
+    const lines = content.split(/\r?\n/);
+    const symbols: Array<{ name: string; line: number }> = [];
+    const seenSyms = new Set<string>();
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (!line) continue;
+      const m =
+        line.match(/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)/) ??
+        line.match(/^\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/) ??
+        line.match(/^\s*(?:export\s+)?(?:interface|type|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/) ??
+        line.match(/^\s*(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>/) ??
+        line.match(/^\s+(?:public\s+|private\s+|protected\s+|static\s+|async\s+)*(?:get\s+|set\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^;]*\{\s*$/) ??
+        line.match(/^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)/) ??
+        line.match(/^\s*func\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_]*)/) ??
+        line.match(/^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/);
+
+      if (m && m[1] && !CONTROL_KEYWORDS.has(m[1]) && !seenSyms.has(m[1])) {
+        seenSyms.add(m[1]);
+        symbols.push({ name: m[1], line: i + 1 });
+        if (symbols.length >= 12) break;
+      }
+    }
+
+    if (symbols.length > 0) {
+      const symText = symbols.map((s) => `\`${s.name}\` (:${s.line})`).join(', ');
+      out.push(`- \`${rel}\` (${lines.length} lines): ${symText}`);
+    } else {
+      out.push(`- \`${rel}\` (${lines.length} lines)`);
+    }
+    if (out.length >= 8) break;
+  }
+
+  return out;
+}
+
 export function buildCurrentStateMarkdown(result: CheckpointResult): string {
   const lines: string[] = [
     '# Previous Iteration State (Historical Context Only)',
@@ -186,6 +250,14 @@ export function buildCurrentStateMarkdown(result: CheckpointResult): string {
 
   if (result.nextSteps) {
     lines.push('## Previous Task Next Steps (Conditional on User Request)', result.nextSteps, '');
+  }
+
+  if (result.activeFileMap && result.activeFileMap.length > 0) {
+    lines.push('## Active Working Files & Symbol Map (Skip File Discovery)');
+    for (const entry of result.activeFileMap) {
+      lines.push(entry);
+    }
+    lines.push('');
   }
 
   lines.push('## Files Modified in Previous Task');
@@ -252,6 +324,7 @@ export function recordCheckpoint(
   }
 
   const referenced = (opts.referencedFiles ?? []).filter((f) => !modifiedFiles.includes(f)).slice(0, 10);
+  const activeFileMap = buildActiveFileSymbolMap(root, [...modifiedFiles, ...referenced]);
 
   const result: CheckpointResult = {
     timestamp,
@@ -259,6 +332,7 @@ export function recordCheckpoint(
     nextSteps: safeNextSteps,
     modifiedFiles,
     ...(referenced.length > 0 ? { referencedFiles: referenced } : {}),
+    ...(activeFileMap.length > 0 ? { activeFileMap } : {}),
     ...(opts.model ? { model: opts.model } : {}),
   };
 

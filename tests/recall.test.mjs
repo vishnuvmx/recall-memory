@@ -5,12 +5,16 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   agentRemember,
+  buildSanitizedInjectionContext,
   closeSharedSqliteStore,
   context,
   costReport,
   initProject,
   passport,
   processLifecycleHookInput,
+  propose,
+  recordCheckpoint,
+  runDoctor,
   syncWorkspace,
   whereIs,
 } from '../dist/index.js';
@@ -189,4 +193,182 @@ test('Normal chat lifecycle hooks (Antigravity & Claude Code) update CURRENT_STA
     assert.equal(whereIs(dir, 'runEngine').length, 0);
   });
 });
+
+test('v0.4.0: Sanitized SessionStart injection, corpus co-occurrence expansion, and non-blocking dedup/conflict warnings', () => {
+  makeTempProject((dir) => {
+    initProject(dir, { allAgents: true });
+
+    // 1. Verify Claude Code settings.local.json registers both SessionStart and Stop hooks
+    const claudeSettings = JSON.parse(fs.readFileSync(path.join(dir, '.claude', 'settings.local.json'), 'utf8'));
+    assert.ok(Array.isArray(claudeSettings.hooks?.SessionStart), 'Expected SessionStart hook in Claude settings');
+    assert.ok(Array.isArray(claudeSettings.hooks?.Stop), 'Expected Stop hook in Claude settings');
+
+    // 2. Seed sibling memories to test corpus co-occurrence query expansion + non-blocking warnings
+    const memJwt = agentRemember(dir, {
+      title: 'JWT 401 bug on container clock skew',
+      type: 'bugfix',
+      tags: ['auth', 'jwt', 'token', 'clock'],
+      text: 'Bearer tokens rejected with HTTP 401 when container NTP drifted by >30s. Added 60s clockTolerance.',
+    });
+    assert.equal(memJwt.action, 'created');
+
+    const memOauth = agentRemember(dir, {
+      title: 'Session cookie SameSite=Lax requirement for OAuth callback',
+      type: 'decision',
+      tags: ['auth', 'oauth', 'cookie', 'login', 'signin', 'jwt'],
+      text: 'Use SameSite=Lax on the session cookie so external OAuth login and signin redirects preserve session state.',
+    });
+    assert.equal(memOauth.action, 'created');
+
+    // Proposed memory MUST NEVER be injected at SessionStart or ranked by default
+    propose(dir, {
+      title: 'Unverified proposal for auth token rotation',
+      type: 'decision',
+      tags: ['auth', 'login', 'jwt'],
+      text: 'UNVERIFIED_PROPOSED_MARKER: rotate tokens every 30 seconds.',
+    });
+
+    // 3. Test corpus-derived co-occurrence + stem retrieval ("signin fails when server clock is off" -> memJwt #1, "login failure" -> memJwt in top 2)
+    const signinHits = context(dir, 'signin fails when server clock is off');
+    assert.equal(signinHits[0]?.memory.id, memJwt.memory.id);
+
+    const loginFailureHits = context(dir, 'login failure');
+    assert.ok(
+      loginFailureHits.slice(0, 2).some((h) => h.memory.id === memJwt.memory.id),
+      'Expected "login failure" to retrieve JWT 401 bugfix in top 2 via corpus tag co-occurrence',
+    );
+    assert.ok(
+      !loginFailureHits.some((h) => h.memory.body.includes('UNVERIFIED_PROPOSED_MARKER')),
+      'Proposed memories must never appear in default context hits',
+    );
+
+    // 4. Test Claude Code SessionStart & UserPromptSubmit injection hook (sanitized, deterministic, no file writes)
+    const passportPath = path.join(dir, '.recall', 'PASSPORT.md');
+    const mtimeBefore = fs.statSync(passportPath).mtimeMs;
+
+    const sessionStartRaw = processLifecycleHookInput(
+      JSON.stringify({
+        session_id: 'claude-sess-1',
+        cwd: dir,
+        hook_event_name: 'SessionStart',
+      }),
+      dir,
+    );
+    const sessionStartParsed = JSON.parse(sessionStartRaw);
+    const injected = sessionStartParsed?.hookSpecificOutput?.additionalContext ?? '';
+    assert.equal(sessionStartParsed?.hookSpecificOutput?.hookEventName, 'SessionStart');
+    assert.match(injected, /JWT 401 bug on container clock skew/);
+    assert.doesNotMatch(injected, /UNVERIFIED_PROPOSED_MARKER/);
+    assert.doesNotMatch(injected, /Unverified proposal for auth token rotation/);
+
+    // Verify deterministic cached output & zero PASSPORT.md mutation
+    const mtimeAfter = fs.statSync(passportPath).mtimeMs;
+    assert.equal(mtimeAfter, mtimeBefore);
+    const secondInjected = buildSanitizedInjectionContext(dir);
+    assert.equal(secondInjected, injected);
+
+    // 5. Test non-blocking near-duplicate and conflict warnings (warn, never auto-merge or auto-supersede)
+    const memRest = agentRemember(dir, {
+      title: 'Use REST endpoints for public client API',
+      type: 'decision',
+      tags: ['api', 'rest', 'endpoints'],
+      text: 'All public client API endpoints use REST JSON over HTTP.',
+    });
+    assert.equal(memRest.action, 'created');
+
+    // Near-duplicate with different title words: should create AND warn, not overwrite memRest
+    const nearDup = agentRemember(dir, {
+      title: 'Public client API endpoint convention',
+      type: 'decision',
+      tags: ['api', 'rest', 'endpoints'],
+      text: 'Expose public client API endpoints using standard REST JSON conventions.',
+    });
+    assert.equal(nearDup.action, 'created');
+    assert.notEqual(nearDup.memory.id, memRest.memory.id);
+    assert.ok(
+      nearDup.warnings?.some((w) => w.includes('Possible duplicate') && w.includes(memRest.memory.id)),
+      `Expected near-duplicate warning referencing ${memRest.memory.id}, got: ${JSON.stringify(nearDup.warnings)}`,
+    );
+
+    // Contradiction / replacement on shared topic: should create AND warn ("Possible conflict"), keeping memRest active!
+    const conflicting = agentRemember(dir, {
+      title: 'Migrate public client API to GraphQL instead of REST',
+      type: 'decision',
+      tags: ['api', 'rest', 'graphql', 'endpoints'],
+      text: 'Switch public client API endpoints to GraphQL instead of REST to avoid over-fetching.',
+    });
+    assert.equal(conflicting.action, 'created');
+    assert.ok(
+      conflicting.warnings?.some((w) => w.includes('Possible conflict') && w.includes(memRest.memory.id)),
+      `Expected conflict warning referencing ${memRest.memory.id}, got: ${JSON.stringify(conflicting.warnings)}`,
+    );
+
+    // Confirm memRest was NOT silently superseded
+    const activeRestHits = context(dir, 'REST endpoints public client API');
+    assert.ok(activeRestHits.some((h) => h.memory.id === memRest.memory.id && h.memory.status === 'active'));
+
+    // 6. Test auto-tag inference when saving an untagged memory
+    const untaggedMem = agentRemember(dir, {
+      title: 'Handle JWT refresh token expiry in REST middleware',
+      type: 'bugfix',
+      text: 'Refresh JWT tokens before calling REST endpoints when clock skew is detected.',
+    });
+    assert.ok(
+      untaggedMem.memory.tags.length >= 2,
+      `Expected untagged memory to auto-infer tags from corpus/title, got: ${JSON.stringify(untaggedMem.memory.tags)}`,
+    );
+    assert.ok(
+      untaggedMem.memory.tags.includes('jwt') || untaggedMem.memory.tags.includes('rest') || untaggedMem.memory.tags.includes('auth'),
+      `Expected inferred tags to include corpus tags, got: ${JSON.stringify(untaggedMem.memory.tags)}`,
+    );
+
+    // 7. Test Active Working Files & Symbol Map in CURRENT_STATE.md and SessionStart injection
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'src', 'auth-handler.ts'),
+      [
+        'export interface AuthSession {',
+        '  userId: string;',
+        '}',
+        '',
+        'export function verifyJwtToken(token: string): boolean {',
+        '  return token.length > 10;',
+        '}',
+        '',
+        'export async function refreshAuthSession(session: AuthSession): Promise<void> {',
+        '  void session;',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+    const cp = recordCheckpoint(
+      dir,
+      path.join(dir, '.recall'),
+      'Implemented verifyJwtToken and refreshAuthSession in src/auth-handler.ts.',
+      { referencedFiles: ['src/auth-handler.ts'] },
+    );
+    assert.ok(cp.activeFileMap && cp.activeFileMap.length > 0, 'Expected activeFileMap to be populated for src/auth-handler.ts');
+    assert.match(cp.activeFileMap[0], /`src\/auth-handler\.ts` \(11 lines\)/);
+    assert.match(cp.activeFileMap[0], /`verifyJwtToken` \(:5\)/);
+    assert.match(cp.activeFileMap[0], /`refreshAuthSession` \(:9\)/);
+
+    const injectedWithMap = buildSanitizedInjectionContext(dir);
+    assert.match(injectedWithMap, /## Active Working Files & Symbol Map \(Skip File Discovery\)/);
+    assert.match(injectedWithMap, /`verifyJwtToken` \(:5\)/);
+
+    // 8. Test runDoctor detection of stale file references when a referenced repo file is deleted
+    agentRemember(dir, {
+      title: 'Legacy token validator location',
+      type: 'fact',
+      tags: ['auth'],
+      text: 'Legacy validation logic lived in `src/deleted-validator.ts` before refactor.',
+    });
+    const doctorChecks = runDoctor(dir);
+    const fileRefCheck = doctorChecks.find((c) => c.name === 'memory file references');
+    assert.ok(fileRefCheck, 'Expected runDoctor to include memory file references check');
+    assert.equal(fileRefCheck.ok, false);
+    assert.match(fileRefCheck.detail, /src\/deleted-validator\.ts/);
+  });
+});
+
 

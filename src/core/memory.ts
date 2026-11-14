@@ -29,6 +29,8 @@ export interface LoadResult {
   /** Plain Markdown docs in rules/ with no frontmatter (hand-written rules). */
   plainDocs: string[];
   problems: Problem[];
+  /** Active memories referencing repo-relative code files that no longer exist on disk. */
+  staleFileRefs?: string[];
 }
 
 export const TYPE_DIR: Record<MemoryType, string> = {
@@ -69,11 +71,17 @@ export function loadAll(recallDir: string): LoadResult {
   const result: LoadResult = { memories: [], plainDocs: [], problems: [] };
   const todayStr = today();
   for (const dir of MEMORY_DIRS) {
+    let dirAbs: string;
+    try {
+      dirAbs = resolveInside(recallDir, dir);
+    } catch {
+      continue;
+    }
     for (const name of listMarkdown(recallDir, dir)) {
       const rel = `${dir}/${name}`;
       let raw: string;
       try {
-        raw = fs.readFileSync(resolveInside(recallDir, dir, name), 'utf8');
+        raw = fs.readFileSync(path.join(dirAbs, name), 'utf8');
       } catch (err) {
         result.problems.push({ file: rel, error: (err as Error).message });
         continue;
@@ -113,7 +121,58 @@ export function loadAll(recallDir: string): LoadResult {
     else seen.set(m.id, m.file);
   }
   result.memories.sort((a, b) => a.id.localeCompare(b.id));
+  result.staleFileRefs = detectStaleFileRefs(recallDir, result.memories);
   return result;
+}
+
+const REPO_FILE_REF_RE = /(?:^|[\s`'"])((?:src|lib|app|packages|scripts|tests|test|cmd|internal)\/[A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java))(?=[\s`'":,.)]|$)/g;
+
+function detectStaleFileRefs(recallDir: string, memories: Memory[]): string[] {
+  const repoRoot = path.dirname(path.resolve(recallDir));
+  const existingTopDirs = new Map<string, boolean>();
+  const stale: string[] = [];
+  const seen = new Set<string>();
+
+  const checkRelPath = (memId: string, rawPath: string): void => {
+    const rel = rawPath.replace(/\\/g, '/').trim();
+    const topDir = rel.split('/')[0];
+    if (!topDir) return;
+    let hasTop = existingTopDirs.get(topDir);
+    if (hasTop === undefined) {
+      try {
+        hasTop = fs.existsSync(path.join(repoRoot, topDir)) && fs.statSync(path.join(repoRoot, topDir)).isDirectory();
+      } catch {
+        hasTop = false;
+      }
+      existingTopDirs.set(topDir, hasTop);
+    }
+    if (!hasTop) return;
+    const abs = path.resolve(repoRoot, rel);
+    if (!abs.startsWith(repoRoot + path.sep)) return;
+    if (!fs.existsSync(abs)) {
+      const key = `${memId}:${rel}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        stale.push(`${memId} (${rel})`);
+      }
+    }
+  };
+
+  for (const m of memories) {
+    if (m.status !== 'active' || m.deprecated) continue;
+    for (const src of m.sources ?? []) {
+      if (/^(?:src|lib|app|packages|scripts|tests|test|cmd|internal)\//.test(src)) {
+        checkRelPath(m.id, src);
+      }
+    }
+    const text = `${m.title}\n${m.body}`;
+    REPO_FILE_REF_RE.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = REPO_FILE_REF_RE.exec(text)) !== null) {
+      if (match[1]) checkRelPath(m.id, match[1]);
+    }
+  }
+  return stale;
 }
 
 const BOILERPLATE_SNIPPETS = [
@@ -142,8 +201,8 @@ function isBoilerplateDoc(raw: string): boolean {
  * (`MEMORY.md` and plain `rules/*.md`) as searchable records so `recall context`
  * and SQLite FTS5/vector search never miss human-authored project rules.
  */
-export function loadSearchableMemories(recallDir: string): Memory[] {
-  const loaded = loadAll(recallDir);
+export function loadSearchableMemories(recallDir: string, preloaded?: LoadResult): Memory[] {
+  const loaded = preloaded ?? loadAll(recallDir);
   const out: Memory[] = [...loaded.memories];
 
   const addPlainDoc = (relPath: string, defaultTitle: string, defaultTags: string[], memType: MemoryType = 'convention'): void => {
@@ -256,7 +315,54 @@ function serialize(meta: MemoryMeta, body: string): string {
   return matter.stringify(`\n${body.trim()}\n`, ordered);
 }
 
-export function createMemory(recallDir: string, input: NewMemory): Memory {
+const AUTO_TAG_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'into', 'that', 'this', 'when', 'where', 'what', 'which',
+  'always', 'never', 'must', 'should', 'avoid', 'prefer', 'use', 'using', 'used', 'instead',
+  'rule', 'memory', 'decision', 'convention', 'lesson', 'bugfix', 'task', 'fact', 'fix', 'fixed',
+  'bug', 'issue', 'error', 'add', 'added', 'update', 'updated', 'remove', 'removed', 'change',
+  'file', 'files', 'code', 'project', 'repo', 'all', 'any', 'not', 'only', 'can', 'will',
+]);
+
+function inferTagsForMemory(title: string, text: string, loaded: Memory[]): string[] {
+  const combinedLower = `${title} ${text}`.toLowerCase();
+  const wordSet = new Set(combinedLower.match(/[a-z0-9_-]{3,}/g) ?? []);
+  const inferred: string[] = [];
+  const seen = new Set<string>();
+
+  // 1. Reuse existing active project tags that appear in this memory's text/title
+  const corpusTagFreq = new Map<string, number>();
+  for (const m of loaded) {
+    if (m.status !== 'active' || m.deprecated) continue;
+    for (const rawTag of m.tags) {
+      const t = rawTag.toLowerCase().trim();
+      if (t.length >= 3) corpusTagFreq.set(t, (corpusTagFreq.get(t) ?? 0) + 1);
+    }
+  }
+  const matchingCorpusTags = [...corpusTagFreq.entries()]
+    .filter(([tag]) => wordSet.has(tag) || combinedLower.includes(tag))
+    .sort((a, b) => b[1] - a[1]);
+
+  for (const [tag] of matchingCorpusTags) {
+    if (!seen.has(tag)) {
+      seen.add(tag);
+      inferred.push(tag);
+      if (inferred.length >= 4) return inferred;
+    }
+  }
+
+  // 2. Fall back to high-signal technical tokens from the title
+  const titleTokens = title.toLowerCase().match(/[a-z][a-z0-9_-]{2,}/g) ?? [];
+  for (const tok of titleTokens) {
+    if (AUTO_TAG_STOPWORDS.has(tok) || seen.has(tok)) continue;
+    seen.add(tok);
+    inferred.push(tok);
+    if (inferred.length >= 4) break;
+  }
+
+  return inferred;
+}
+
+export function createMemory(recallDir: string, input: NewMemory, preloaded?: Memory[]): Memory {
   const title = input.title.trim();
   const text = input.text.trim();
   if (!title) throw new RecallError('A memory needs a non-empty title.');
@@ -266,13 +372,15 @@ export function createMemory(recallDir: string, input: NewMemory): Memory {
 
   const type = input.type ?? 'fact';
   const dir = TYPE_DIR[type];
-  const loaded = loadAll(recallDir).memories;
+  const loaded = preloaded ?? loadAll(recallDir).memories;
   let n = maxIdNumber(recallDir, loaded) + 1;
 
   const confidence = input.confidence !== undefined ? input.confidence : 1.0;
   // Require explicit confirmation for low-confidence claims by forcing status: 'proposed'
   const forcedStatus = confidence < 0.7 ? 'proposed' : undefined;
   const verification: Verification = confidence < 0.7 ? 'needs_review' : 'unverified';
+  const explicitTags = [...new Set((input.tags ?? []).map((t) => t.trim()).filter(Boolean))];
+  const finalTags = explicitTags.length > 0 ? explicitTags : inferTagsForMemory(title, text, loaded);
 
   for (let attempt = 0; attempt < 100; attempt++, n++) {
     const id = `mem_${String(n).padStart(3, '0')}`;
@@ -283,7 +391,7 @@ export function createMemory(recallDir: string, input: NewMemory): Memory {
       type,
       created: date,
       updated: date,
-      tags: [...new Set((input.tags ?? []).map((t) => t.trim()).filter(Boolean))],
+      tags: finalTags,
       status: forcedStatus ?? input.status ?? (process.env.RECALL_AGENT === '1' ? 'proposed' : 'active'),
       verification,
       sources: input.sources ?? [],

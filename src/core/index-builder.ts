@@ -48,11 +48,14 @@ export function renderIndex(existing: string, loaded: LoadResult): string {
 }
 
 /** Rebuild INDEX.md; text outside the managed block is preserved. */
-export function rebuildIndex(recallDir: string): LoadResult {
-  const loaded = loadAll(recallDir);
+export function rebuildIndex(recallDir: string, preloaded?: LoadResult): LoadResult {
+  const loaded = preloaded ?? loadAll(recallDir);
   const file = indexPath(recallDir);
   const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-  atomicWrite(file, renderIndex(existing, loaded));
+  const rendered = renderIndex(existing, loaded);
+  if (rendered !== existing) {
+    atomicWrite(file, rendered);
+  }
   return loaded;
 }
 

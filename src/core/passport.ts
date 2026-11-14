@@ -382,7 +382,7 @@ export function passportMaxChars(profile: ProfileTier): number {
 export function syncPassport(
   root: string,
   recallDir: string,
-  opts: { profile?: ProfileTier; force?: boolean } = {},
+  opts: { profile?: ProfileTier; force?: boolean; memories?: Memory[] } = {},
 ): PassportSyncResult {
   let profile: ProfileTier = opts.profile ?? 'standard';
   if (!opts.profile) {
@@ -395,7 +395,7 @@ export function syncPassport(
 
   const identity = extractProjectIdentity(root);
   const files = scanLandmarks(root, 1, Number.POSITIVE_INFINITY, 16, recallDir);
-  const searchable = loadSearchableMemories(recallDir);
+  const searchable = opts.memories ?? loadSearchableMemories(recallDir);
   const passportHash = computePassportHash(identity, files, searchable, profile);
 
   const file = resolveInside(recallDir, 'PASSPORT.md');

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
 import { Command, InvalidArgumentError } from 'commander';
-import { runLifecycleHook, syncWorkspace } from '../core/chat-sync.js';
+import { buildSanitizedInjectionContext, runLifecycleHook, syncWorkspace } from '../core/chat-sync.js';
 import { costReport } from '../core/cost.js';
 import { runDoctor } from '../core/doctor.js';
 import { formatHybridHitsCompact } from '../core/hybrid-retrieval.js';
@@ -32,7 +32,7 @@ const print = (s = ''): void => console.log(s);
 
 const program = new Command('recall')
   .description('Zero-maintenance, local-first project memory for AI coding agents. Plain Markdown, no network.')
-  .version('0.3.0');
+  .version('0.4.0');
 
 program
   .command('init')
@@ -139,6 +139,11 @@ program
     const m = r.memory;
     print(`${r.action === 'updated' ? 'Updated' : 'Saved'} ${m.id} (${m.type}, ${m.status}, ${m.verification}) -> .recall/${m.file}`);
     if (m.status === 'proposed') print(`  Proposed: run \`recall approve ${m.id}\` to make it searchable.`);
+    if (r.warnings && r.warnings.length > 0) {
+      for (const w of r.warnings) {
+        print(`  Warning: ${w}`);
+      }
+    }
   });
 
 program
@@ -494,8 +499,15 @@ program
 
 program
   .command('hook')
-  .description('Universal agent lifecycle hook (reads stdin JSON from Antigravity, Claude Code, Cursor, or chat pipe)')
-  .action(async () => {
+  .description('Universal agent lifecycle hook (reads stdin JSON from Claude Code, Antigravity, Cursor, or outputs sanitized SessionStart context with --inject)')
+  .option('--inject [query]', 'output deterministic, sanitized SessionStart / prompt context (never includes proposed or poisoned memories)')
+  .action(async (o: { inject?: boolean | string }) => {
+    if (o.inject !== undefined) {
+      const q = typeof o.inject === 'string' ? o.inject : undefined;
+      const out = buildSanitizedInjectionContext(cwd(), { query: q });
+      if (out) print(out);
+      return;
+    }
     const out = await runLifecycleHook(cwd());
     print(out);
   });

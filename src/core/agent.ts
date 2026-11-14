@@ -129,18 +129,20 @@ function syncClaudeHook(root: string, createMissing = false): boolean {
     }
 
     const hooksObj = (settings.hooks && typeof settings.hooks === 'object' ? settings.hooks : {}) as Record<string, unknown>;
-    const stopArr = Array.isArray(hooksObj.Stop) ? (hooksObj.Stop as Array<Record<string, unknown>>) : [];
-    const alreadyInstalled = stopArr.some((entry) => {
-      const inner = Array.isArray(entry?.hooks) ? (entry.hooks as Array<{ command?: string }>) : [];
-      return inner.some((h) => h.command === HOOK_COMMAND);
-    });
-
-    if (!alreadyInstalled) {
-      stopArr.push({
-        hooks: [{ type: 'command', command: HOOK_COMMAND, timeout: 15 }],
+    for (const eventName of ['SessionStart', 'Stop']) {
+      const eventArr = Array.isArray(hooksObj[eventName]) ? (hooksObj[eventName] as Array<Record<string, unknown>>) : [];
+      const alreadyInstalled = eventArr.some((entry) => {
+        const inner = Array.isArray(entry?.hooks) ? (entry.hooks as Array<{ command?: string }>) : [];
+        return inner.some((h) => h.command === HOOK_COMMAND);
       });
+
+      if (!alreadyInstalled) {
+        eventArr.push({
+          hooks: [{ type: 'command', command: HOOK_COMMAND, timeout: 15 }],
+        });
+      }
+      hooksObj[eventName] = eventArr;
     }
-    hooksObj.Stop = stopArr;
     settings.hooks = hooksObj;
     writeIfChanged(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
     return true;

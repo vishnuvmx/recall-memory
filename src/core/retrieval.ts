@@ -16,11 +16,11 @@ export interface SearchHit {
   excerpt: string;
 }
 
-const STOP = new Set([
+export const STOP = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'are', 'was',
-  'how', 'why', 'what', 'when', 'should', 'can', 'could', 'would', 'will',
+  'how', 'why', 'what', 'when', 'where', 'should', 'can', 'could', 'would', 'will',
   'have', 'has', 'had', 'been', 'about', 'each', 'more', 'some', 'than',
-  'them', 'then', 'they', 'does', 'did', 'done', 'also', 'such',
+  'them', 'then', 'they', 'does', 'did', 'done', 'also', 'such', 'under', 'before', 'after',
 ]);
 
 export function stemCandidates(word: string): string[] {
@@ -36,6 +36,15 @@ export function stemCandidates(word: string): string[] {
     }
   } else if (s.endsWith('ies') && s.length > 4) {
     cands.add(s.slice(0, -3) + 'y');
+  } else if (s.endsWith('ied') && s.length > 4) {
+    cands.add(s.slice(0, -3) + 'y');
+    cands.add(s.slice(0, -2));
+  } else if (s.endsWith('ation') && s.length > 6) {
+    const base = s.slice(0, -5);
+    cands.add(base);
+    cands.add(`${base}e`);
+  } else if (s.endsWith('ure') && s.length > 5) {
+    cands.add(s.slice(0, -3));
   } else if (s.endsWith('es') && s.length > 4) {
     cands.add(s.slice(0, -2));
     cands.add(s.slice(0, -1));

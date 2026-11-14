@@ -13,7 +13,7 @@ Init once — your AI agent does the reading, learning, and checkpointing.
 
 <!-- Badges -->
 
-[![Status: Alpha](https://img.shields.io/badge/status-alpha%20(v0.3.0)-orange.svg)](#-about)
+[![Status: Alpha](https://img.shields.io/badge/status-alpha%20(v0.4.0)-orange.svg)](#-about)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
@@ -58,7 +58,7 @@ Init once — your AI agent does the reading, learning, and checkpointing.
 ## 🎯 About
 
 > [!NOTE]
-> **Status: Alpha (v0.3.0)**. Recall gives AI coding agents persistent project memory in plain Markdown inside `.recall/`.
+> **Status: Alpha (v0.4.0)**. Recall gives AI coding agents persistent project memory in plain Markdown inside `.recall/`.
 
 AI coding agents forget decisions between sessions and repeatedly re-scan entire repositories. Recall gives them structured memory and codebase topology with complete automation and zero prompt bloat.
 
@@ -248,12 +248,12 @@ If `AGENTS.md` already exists, any instructions outside those boundaries are str
 
 ## 🔍 How Hybrid Retrieval Works
 
-Recall combines deterministic indexing, full-text BM25 search, and dense semantic embeddings with zero external network calls:
+Recall combines deterministic indexing, corpus tag co-occurrence expansion, and SQLite FTS5 BM25 search with zero external network calls:
 
 1. **Exact-Match Technical Identifier Boost**: Code identifiers (camelCase, PascalCase, snake_case), error codes (`ERR_...`, `SQLITE_...`, `EEXIST`), filenames (`*.ts`, `Dockerfile`), and CLI commands receive high priority boost (+12 to +20).
-2. **BM25 Keyword Matching**: Full-text indexing using SQLite FTS5 with Porter stemming and BM25 ranking across titles, tags, and document bodies.
-3. **Dense Vector Semantic Similarity**: Local deterministic subword embedding generation (`recall-dense-v1`) with cosine similarity, bridging vocabulary mismatch without external cloud APIs.
-4. **Recency Weighting & Confidence Gating**: Exponential decay favoring fresh memories while weighting by confidence scores and verification status. Outdated or expired facts are automatically filtered out.
+2. **Corpus Tag Co-Occurrence Expansion & Weighted Min-Max Fusion**: Queries are expanded using bridge tags from your own project memories ($2 \le df(t) \le 0.35N$) and merged across keyword + SQLite FTS5 BM25 channels via weighted Min-Max score normalization (`Recall@1: 96.4%`, `Recall@3: 100.0%` on `npm run eval`).
+3. **Sanitized `SessionStart` Context & Active File Symbol Map**: Automatically injects sanitized project blueprints (`PASSPORT.md`) and live `:line` symbol maps for active working files (`CURRENT_STATE.md`) while stripping `proposed`, expired, or poisoned memories.
+4. **Non-Blocking Dedup & Conflict Warnings**: Flags near-duplicate memories and contradictory replacements (`instead of`, `migrate from X to Y`, `no longer`) with warnings without silently overwriting existing rules.
 5. **Multi-Tenant & Workspace Isolation**: Queries strictly enforce `tenantId` and `workspaceId` boundaries, preventing cross-project memory leakage.
 6. **Token-Budget Cap**: Search outputs are strictly capped at ~400 tokens / 1,600 characters to prevent context dilution.
 
@@ -324,7 +324,9 @@ Unsupported file types are still mapped in the directory tree; symbol landmarkin
 npm install          # install dependencies
 npm run build        # compile TypeScript to dist/
 npm run typecheck    # type-check without emitting
-npm run bench        # run benchmarks
+npm test             # build and run test suite
+npm run eval         # run 28-query retrieval evaluation harness
+npm run bench        # run 7-part benchmark suite
 ```
 
 ### Project layout

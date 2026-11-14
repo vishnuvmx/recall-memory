@@ -7,9 +7,9 @@ import { generateProjectMap } from './mapper.js';
 import { appendChangelog, createMemory, findMemory, loadAll, loadSearchableMemories, rewriteMemory, updateMemory, type Memory, type NewMemory } from './memory.js';
 import { syncPassport, type PassportSyncResult } from './passport.js';
 import { requireInitialized, type Project } from './project.js';
-import { search, tokenize, type SearchHit, type SearchOptions } from './retrieval.js';
-import { hybridSearch, type HybridSearchHit } from './hybrid-retrieval.js';
-import { detectConflicts, supersedeMemory } from './conflict.js';
+import { search, stem, tokenize, type SearchHit, type SearchOptions } from './retrieval.js';
+import { hybridSearch, type FusionMode, type HybridSearchHit } from './hybrid-retrieval.js';
+import { detectConflicts } from './conflict.js';
 import { getSharedSqliteStore } from './sqlite-store.js';
 import { where, type WhereHit } from './where.js';
 import { PROFILE_BUDGETS, type ProfileTier, type WriteMode } from '../schemas/index.js';
@@ -23,17 +23,24 @@ export interface ContextOptions extends SearchOptions {
   maxTokens?: number;
   maxChars?: number;
   includeSuperseded?: boolean;
+  fusionMode?: FusionMode;
 }
 
-function refreshDerivedStores(p: Project): void {
-  rebuildIndex(p.recallDir);
+function refreshDerivedStores(p: Project, changedMemories?: Memory[]): void {
+  const loaded = rebuildIndex(p.recallDir);
+  const searchable = loadSearchableMemories(p.recallDir, loaded);
   try {
-    getSharedSqliteStore(p.recallDir).ensureSynced(loadSearchableMemories(p.recallDir));
+    const store = getSharedSqliteStore(p.recallDir);
+    if (changedMemories && changedMemories.length > 0) {
+      store.syncChangedMemories(changedMemories, searchable);
+    } else {
+      store.ensureSynced(searchable);
+    }
   } catch {
     /* fallback cleanly when node:sqlite unavailable */
   }
   try {
-    syncPassport(p.root, p.recallDir);
+    syncPassport(p.root, p.recallDir, { memories: searchable });
   } catch {
     /* non-fatal */
   }
@@ -44,7 +51,7 @@ export function remember(start: string, input: NewMemory, action = 'remember'): 
   const p = requireInitialized(start);
   const m = createMemory(p.recallDir, input);
   appendChangelog(p.recallDir, action, m);
-  refreshDerivedStores(p);
+  refreshDerivedStores(p, [m]);
   return m;
 }
 
@@ -55,36 +62,73 @@ export function propose(start: string, input: NewMemory): Memory {
 
 const normTitle = (t: string): string => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 
-/** Same normalized title, or high word overlap (Jaccard >= 0.7 over >= 2 words each). */
+/** Exact normalized title match only (so fuzzy matches warn instead of silently overwriting). */
 export function findDuplicate(candidates: Memory[], title: string): Memory | undefined {
   const n = normTitle(title);
-  const exact = candidates.find((m) => normTitle(m.title) === n);
-  if (exact) return exact;
-  const a = new Set(tokenize(title));
-  if (a.size < 2) return undefined;
-  let best: { m: Memory; j: number } | undefined;
+  return candidates.find((m) => normTitle(m.title) === n);
+}
+
+export interface NearDuplicateHit {
+  memory: Memory;
+  similarity: number;
+}
+
+/**
+ * Finds near-duplicate memories by stemmed title, tag, and body token overlap
+ * without auto-merging them.
+ */
+export function findNearDuplicates(candidates: Memory[], input: NewMemory): NearDuplicateHit[] {
+  const n = normTitle(input.title);
+  const candTitleStems = new Set(tokenize(input.title).map(stem));
+  const candTagStems = new Set((input.tags ?? []).flatMap((t) => tokenize(t)).map(stem));
+  const candTopicStems = new Set([...candTitleStems, ...candTagStems]);
+  const candBodyStems = new Set(tokenize(input.text).slice(0, 40).map(stem));
+
+  if (candTopicStems.size === 0) return [];
+
+  const hits: NearDuplicateHit[] = [];
   for (const m of candidates) {
-    const b = new Set(tokenize(m.title));
-    if (b.size < 2) continue;
-    const inter = [...a].filter((t) => b.has(t)).length;
-    const j = inter / (a.size + b.size - inter);
-    if (j >= 0.7 && (!best || j > best.j)) best = { m, j };
+    if (normTitle(m.title) === n) continue;
+
+    const mTitleStems = new Set(tokenize(m.title).map(stem));
+    const mTagStems = new Set(m.tags.flatMap((t) => tokenize(t)).map(stem));
+    const mTopicStems = new Set([...mTitleStems, ...mTagStems]);
+    const mBodyStems = new Set(tokenize(m.body).slice(0, 40).map(stem));
+
+    if (mTopicStems.size === 0) continue;
+
+    const topicInter = [...candTopicStems].filter((t) => mTopicStems.has(t)).length;
+    const topicDice = (2 * topicInter) / (candTopicStems.size + mTopicStems.size);
+
+    const bodyInter = [...candBodyStems].filter((t) => mBodyStems.has(t)).length;
+    const bodyDice =
+      candBodyStems.size > 0 && mBodyStems.size > 0
+        ? (2 * bodyInter) / (candBodyStems.size + mBodyStems.size)
+        : 0;
+
+    const combinedSim = topicDice * 0.7 + bodyDice * 0.3;
+    if (topicDice >= 0.55 || combinedSim >= 0.48) {
+      hits.push({ memory: m, similarity: Math.round(Math.max(topicDice, combinedSim) * 100) / 100 });
+    }
   }
-  return best?.m;
+
+  hits.sort((a, b) => b.similarity - a.similarity);
+  return hits.slice(0, 3);
 }
 
 export interface RememberResult {
   memory: Memory;
   action: 'created' | 'updated';
+  warnings?: string[];
 }
 
 /**
  * The write path for agents (CLI `remember` and MCP `recall_remember`).
  * - `writes: auto` (default): active immediately, so memory is useful without human ceremony.
  * - `writes: review` or RECALL_AGENT=1: lands as `proposed`.
- * A near-duplicate title updates the existing memory instead of adding another file, which keeps
- * retrieval results (and their token cost) from growing with repetition.
- * Also handles conflicting facts by superseding older conflicting memories.
+ * An exact normalized title match updates the existing memory in place; fuzzy near-duplicates
+ * and potential contradictions emit non-blocking `warnings` for review rather than silently
+ * merging or superseding.
  */
 export function agentRemember(start: string, input: NewMemory): RememberResult {
   const p = requireInitialized(start);
@@ -103,23 +147,36 @@ export function agentRemember(start: string, input: NewMemory): RememberResult {
     (m) => m.type === type && (status === 'active' ? m.status === 'active' || m.status === 'proposed' : m.status === 'proposed'),
   );
   const dup = findDuplicate(candidates, input.title);
-  const memory = dup
-    ? rewriteMemory(p.recallDir, dup.id, { ...input, type, status })
-    : createMemory(p.recallDir, { ...input, type, status });
+  const warnings: string[] = [];
 
-  // Handle conflicting facts when saving an active memory: supersede conflicting older active memories
-  if (!dup && status === 'active') {
+  if (!dup) {
+    const nearDups = findNearDuplicates(
+      allMemories.filter((m) => m.status === 'active' || m.status === 'proposed'),
+      input,
+    );
+    for (const nd of nearDups) {
+      warnings.push(
+        `Possible duplicate of ${nd.memory.id} "${nd.memory.title}" (.recall/${nd.memory.file}, similarity: ${Math.round(nd.similarity * 100)}%) — consider merging or archiving.`,
+      );
+    }
+
     const conflict = detectConflicts(allMemories, input);
     if (conflict.hasConflict) {
-      for (const oldMem of conflict.conflictingMemories) {
-        supersedeMemory(p.recallDir, oldMem.id, memory.id, `Superseded by ${memory.id}: ${memory.title}`);
-      }
+      warnings.push(...conflict.warnings);
     }
   }
 
+  const memory = dup
+    ? rewriteMemory(p.recallDir, dup.id, { ...input, type, status })
+    : createMemory(p.recallDir, { ...input, type, status }, allMemories);
+
   appendChangelog(p.recallDir, dup ? 'update' : 'remember', memory);
-  refreshDerivedStores(p);
-  return { memory, action: dup ? 'updated' : 'created' };
+  refreshDerivedStores(p, [memory]);
+  return {
+    memory,
+    action: dup ? 'updated' : 'created',
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
 }
 
 export function whereIs(start: string, query: string, limit?: number): WhereHit[] {
@@ -131,7 +188,7 @@ export function approve(start: string, id: string): Memory {
   const p = requireInitialized(start);
   const m = updateMemory(p.recallDir, id, { status: 'active', verification: 'verified' });
   appendChangelog(p.recallDir, 'approve', m);
-  refreshDerivedStores(p);
+  refreshDerivedStores(p, [m]);
   return m;
 }
 
@@ -139,7 +196,7 @@ export function archive(start: string, id: string): Memory {
   const p = requireInitialized(start);
   const m = updateMemory(p.recallDir, id, { status: 'archived' });
   appendChangelog(p.recallDir, 'archive', m);
-  refreshDerivedStores(p);
+  refreshDerivedStores(p, [m]);
   return m;
 }
 
@@ -166,6 +223,7 @@ export function contextHybrid(start: string, query: string, opts: ContextOptions
     sqliteStore: store,
     maxTokens: opts.maxTokens,
     maxChars: opts.maxChars,
+    fusionMode: opts.fusionMode,
   });
 }
 
@@ -285,7 +343,7 @@ export function approveAll(start: string): Memory[] {
     approved.push(updated);
   }
   if (approved.length > 0) {
-    refreshDerivedStores(p);
+    refreshDerivedStores(p, approved);
   }
   return approved;
 }
@@ -300,7 +358,7 @@ export function archiveAll(start: string): Memory[] {
     archived.push(updated);
   }
   if (archived.length > 0) {
-    refreshDerivedStores(p);
+    refreshDerivedStores(p, archived);
   }
   return archived;
 }

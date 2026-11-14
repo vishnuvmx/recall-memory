@@ -4,18 +4,21 @@ import path from 'node:path';
 import { syncAllAgentIntegrations } from './agent.js';
 import { recordCheckpoint } from './checkpoint.js';
 import { loadConfig } from './config.js';
+import { isMemoryExpired } from './conflict.js';
 import { repoChanges } from './git.js';
+import { formatHybridHitsCompact, hybridSearch } from './hybrid-retrieval.js';
 import { indexState, rebuildIndex } from './index-builder.js';
 import { DEFAULT_IGNORED_DIRS, TEST_FILE_REGEX, createGitignoreFilter, generateProjectMap } from './mapper.js';
-import { loadSearchableMemories } from './memory.js';
-import { loadFingerprint, saveFingerprint, syncPassport } from './passport.js';
+import { loadSearchableMemories, type Memory } from './memory.js';
+import { PASSPORT_BLOCK_NAME, loadFingerprint, saveFingerprint, syncPassport } from './passport.js';
 import { findProject } from './project.js';
 import { agentRemember } from './service.js';
 import { computeMemoriesDigest, getSharedSqliteStore } from './sqlite-store.js';
 import type { MemoryType, ProfileTier } from '../schemas/index.js';
 import { detectPromptInjection } from '../security/poisoning.js';
 import { findSecrets, redactSecrets } from '../security/secrets.js';
-import { toPosix } from '../utils/fs.js';
+import { atomicWrite, toPosix } from '../utils/fs.js';
+import { extractManagedBlock } from '../utils/managed.js';
 
 export interface ParsedChatTurn {
   conversationId?: string;
@@ -640,6 +643,200 @@ export interface HookPayload {
   response?: string;
 }
 
+export interface InjectionOptions {
+  query?: string;
+  maxTokens?: number;
+  maxChars?: number;
+}
+
+/**
+ * Deterministic, read-only, sanitized context builder for `SessionStart` and `UserPromptSubmit` hooks.
+ * - NEVER injects memories with `proposed`, `superseded`, or `archived` status.
+ * - NEVER injects memories or passport lines that fail prompt injection (`detectPromptInjection`) or secret checks (`findSecrets`).
+ * - NEVER rewrites tracked project files (`.recall/PASSPORT.md`, `INDEX.md`, `CURRENT_STATE.md`), keeping `SessionStart` fast and side-effect-free.
+ */
+export function buildSanitizedInjectionContext(start: string, opts: InjectionOptions = {}): string {
+  const p = findProject(start);
+  if (!p.initialized) return '';
+
+  const { recallDir } = p;
+  const maxTokens = opts.maxTokens ?? 550;
+  const maxChars = opts.maxChars ?? 2200;
+  const effectiveMaxChars = Math.min(maxChars, maxTokens * 4);
+  const queryClean = opts.query ? stripPromptWrappers(opts.query).trim() : '';
+
+  const passportPath = path.join(recallDir, 'PASSPORT.md');
+  const currentStatePath = path.join(recallDir, 'CURRENT_STATE.md');
+  let passportStatKey = 'missing';
+  try {
+    const pStat = fs.existsSync(passportPath) ? fs.statSync(passportPath) : undefined;
+    const csStat = fs.existsSync(currentStatePath) ? fs.statSync(currentStatePath) : undefined;
+    passportStatKey = `${pStat ? `${pStat.size}:${Math.floor(pStat.mtimeMs)}` : 'no-p'}|${csStat ? `${csStat.size}:${Math.floor(csStat.mtimeMs)}` : 'no-cs'}`;
+  } catch {
+    passportStatKey = 'err';
+  }
+
+  const fp = loadFingerprint(recallDir);
+  const cachePath = path.join(recallDir, '.cache', 'injection-cache.json');
+
+  // Fast-path cache check before reading/parsing all Markdown files on SessionStart
+  if (fp.memoriesHash) {
+    const fastKey = crypto
+      .createHash('sha256')
+      .update(`v1\0${passportStatKey}\0${fp.memoriesHash}\0${queryClean.toLowerCase()}\0${effectiveMaxChars}`)
+      .digest('hex');
+    try {
+      if (fs.existsSync(cachePath)) {
+        const cached = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as { fastKey?: string; context?: string };
+        if (cached.fastKey === fastKey && typeof cached.context === 'string') {
+          return cached.context;
+        }
+      }
+    } catch {
+      // ignore corrupt cache
+    }
+  }
+
+  const allMemories = loadSearchableMemories(recallDir);
+  // Strict security gate: only active, non-expired, non-deprecated memories that pass poisoning & secret checks
+  const safeActiveMemories: Memory[] = [];
+  const unsafeTitles = new Set<string>();
+
+  for (const m of allMemories) {
+    if (m.status !== 'active' || m.deprecated || isMemoryExpired(m)) {
+      unsafeTitles.add(m.title.trim().toLowerCase());
+      continue;
+    }
+    const combined = `${m.title}\n${m.body}`;
+    if (detectPromptInjection(combined).isPoisoned || findSecrets(combined).length > 0) {
+      unsafeTitles.add(m.title.trim().toLowerCase());
+      continue;
+    }
+    safeActiveMemories.push(m);
+  }
+
+  const safeDigest = computeMemoriesDigest(safeActiveMemories);
+  const cacheKey = crypto
+    .createHash('sha256')
+    .update(`v1\0${passportStatKey}\0${safeDigest}\0${queryClean.toLowerCase()}\0${effectiveMaxChars}`)
+    .digest('hex');
+  const fastKey = fp.memoriesHash
+    ? crypto
+        .createHash('sha256')
+        .update(`v1\0${passportStatKey}\0${fp.memoriesHash}\0${queryClean.toLowerCase()}\0${effectiveMaxChars}`)
+        .digest('hex')
+    : undefined;
+
+  try {
+    if (fs.existsSync(cachePath)) {
+      const cached = JSON.parse(fs.readFileSync(cachePath, 'utf8')) as { key?: string; context?: string };
+      if (cached.key === cacheKey && typeof cached.context === 'string') {
+        return cached.context;
+      }
+    }
+  } catch {
+    // ignore corrupt cache
+  }
+
+  const sections: string[] = [];
+
+  // 1. Read existing PASSPORT.md without triggering cold regeneration, sanitizing each line
+  if (fs.existsSync(passportPath)) {
+    try {
+      const rawPassport = fs.readFileSync(passportPath, 'utf8');
+      const block = extractManagedBlock(rawPassport, PASSPORT_BLOCK_NAME) ?? rawPassport.trim();
+      const safeLines = block.split('\n').filter((line) => {
+        if (!line.trim()) return true;
+        if (detectPromptInjection(line).isPoisoned || findSecrets(line).length > 0) return false;
+        const lower = line.toLowerCase();
+        for (const badTitle of unsafeTitles) {
+          if (badTitle.length >= 6 && lower.includes(badTitle)) return false;
+        }
+        return true;
+      });
+      const cleanedPassport = safeLines.join('\n').trim();
+      if (cleanedPassport) {
+        sections.push(cleanedPassport);
+      }
+    } catch {
+      // ignore unreadable passport
+    }
+  }
+
+  // 1b. Append sanitized Active Working Files & Symbol Map from CURRENT_STATE.md if present
+  if (fs.existsSync(currentStatePath)) {
+    try {
+      const rawCs = fs.readFileSync(currentStatePath, 'utf8');
+      const marker = '## Active Working Files & Symbol Map (Skip File Discovery)';
+      const idx = rawCs.indexOf(marker);
+      if (idx !== -1) {
+        const after = rawCs.slice(idx + marker.length).split(/\r?\n/);
+        const mapLines: string[] = [];
+        for (const line of after) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('## ')) break;
+          if (!trimmed.startsWith('- `')) continue;
+          if (detectPromptInjection(trimmed).isPoisoned || findSecrets(trimmed).length > 0) continue;
+          mapLines.push(trimmed);
+        }
+        if (mapLines.length > 0) {
+          sections.push('', marker, ...mapLines);
+        }
+      }
+    } catch {
+      // ignore unreadable current state
+    }
+  }
+
+  // 2. If a prompt query is provided (e.g. UserPromptSubmit), append top sanitized hybrid matches
+  if (queryClean && safeActiveMemories.length > 0) {
+    let store;
+    try {
+      store = getSharedSqliteStore(recallDir);
+    } catch {
+      store = undefined;
+    }
+    const hits = hybridSearch(safeActiveMemories, queryClean, {
+      limit: 4,
+      includeProposed: false,
+      includeArchived: false,
+      includeSuperseded: false,
+      sqliteStore: store,
+    });
+    if (hits.length > 0) {
+      sections.push('', `## Relevant Active Memory`, formatHybridHitsCompact(hits, 600, 150));
+    }
+  } else if (sections.length === 0 && safeActiveMemories.length > 0) {
+    // Fallback if PASSPORT.md was missing: deterministic list of active decisions/conventions
+    const lines = ['# Project Memory (Sanitized Active Rules)'];
+    for (const m of safeActiveMemories.slice(0, 8)) {
+      lines.push(`- **[${m.type}] ${m.title}** (\`.recall/${m.file}\`)`);
+    }
+    sections.push(lines.join('\n'));
+  }
+
+  let output = sections.join('\n').trim();
+  if (output.length > effectiveMaxChars) {
+    const cut = output.slice(0, effectiveMaxChars - 40);
+    const lastNl = cut.lastIndexOf('\n');
+    output = `${cut.slice(0, lastNl > 0 ? lastNl : cut.length)}\n...[capped]`;
+  }
+
+  // Final safety gate on assembled output
+  if (detectPromptInjection(output).isPoisoned) {
+    output = detectPromptInjection(output).neutralizedText;
+  }
+  output = redactSecrets(output).redacted;
+
+  try {
+    atomicWrite(cachePath, `${JSON.stringify({ key: cacheKey, fastKey, context: output }, null, 2)}\n`);
+  } catch {
+    // non-fatal if cache write fails
+  }
+
+  return output;
+}
+
 /**
  * Universal lifecycle hook handler for Antigravity, Claude Code, Cursor, Windsurf, and CLI pipes.
  * Never throws; always returns valid hook JSON for the calling agent runtime.
@@ -659,14 +856,31 @@ export function processLifecycleHookInput(rawStdin: string, fallbackCwd = proces
     plainNote = trimmed;
   }
 
-  const isAntigravityStop =
-    typeof payload.terminationReason === 'string' || typeof payload.executionNum === 'number';
-
   const startDir =
     payload.workspacePaths?.[0] ||
     payload.workspace_roots?.[0] ||
     payload.cwd ||
     fallbackCwd;
+
+  const eventName = payload.hook_event_name || '';
+  if (eventName === 'SessionStart' || eventName === 'UserPromptSubmit') {
+    try {
+      const query = eventName === 'UserPromptSubmit' ? (payload.prompt || payload.lastUserInput) : undefined;
+      const additionalContext = buildSanitizedInjectionContext(startDir, { query });
+      if (!additionalContext) return '{}';
+      return JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: eventName,
+          additionalContext,
+        },
+      });
+    } catch {
+      return '{}';
+    }
+  }
+
+  const isAntigravityStop =
+    typeof payload.terminationReason === 'string' || typeof payload.executionNum === 'number';
 
   try {
     syncWorkspace(startDir, {

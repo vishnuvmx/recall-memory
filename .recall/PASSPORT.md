@@ -16,6 +16,7 @@
 - `npm run sync` → `node scripts/recall-sync.js`
 - `npm run bench` → `node scripts/benchmark.js`
 - `npm run context-pack` → `node scripts/recall-context-pack.js`
+- `npm run eval` → `node scripts/eval.js`
 
 ## 3. Non-Volatile Rules, Decisions & Invariants
 - Local-first execution: Zero runtime network calls, zero telemetry, zero cloud vector stores.
@@ -42,11 +43,10 @@
 - `src/core/doctor.ts`: `Check`, `runDoctor`
 - `src/core/embeddings.ts`: `EmbeddingResult`, `hashContent`, `cosineSimilarity`, `generateLocalDenseVector`, `getOrGenerateEmbedding`
 - `src/core/git.ts`: `GitInfo`, `gitInfo`, `recallChanges`, `repoChanges`, `Commit`
-- `src/core/hybrid-retrieval.ts`: `HybridSearchOptions`, `HybridSearchHit`, `extractTechnicalIdentifiers`, `hybridSearch`, `formatHybridHitsCompact`
+- `src/core/hybrid-retrieval.ts`: `FusionMode`, `HybridSearchOptions`, `HybridSearchHit`, `extractTechnicalIdentifiers`, `expandQueryFromCorpus`
 - `src/core/index-builder.ts`: `buildIndexBlock`, `indexPath`, `renderIndex`, `rebuildIndex`, `IndexState`
 - `src/core/init.ts`: `InitReport`, `initProject`
 - `src/core/landmarks.ts`: `Landmark`, `FileLandmarks`, `extractLandmarks`, `scanLandmarks`, `formatLandmarksMarkdown`
 - `src/core/mapper.ts`: `DirectoryInfo`, `ProjectMapData`, `createGitignoreFilter`, `parseGitignore`, `ScanProjectOptions`
-- `src/core/memory.ts`: `Memory`, `Problem`, `LoadResult`, `slugify`, `loadAll`
-- _... (19 more modules — query `recall where <name>`)_
+- _... (21 more modules — query `recall where <name>`)_
 <!-- recall:passport:end -->

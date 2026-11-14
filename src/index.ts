@@ -21,6 +21,8 @@ export {
   checkpoint,
   prune,
   agentRemember,
+  findDuplicate,
+  findNearDuplicates,
   whereIs,
 } from './core/service.js';
 export {
@@ -34,19 +36,21 @@ export {
   syncWorkspace,
   parseTranscriptTail,
   extractDurableInsights,
+  buildSanitizedInjectionContext,
   processLifecycleHookInput,
   runLifecycleHook,
 } from './core/chat-sync.js';
 export { seed } from './core/seed.js';
 export { generateProjectMap } from './core/mapper.js';
-export { recordCheckpoint, pruneSessions, pruneSessionLog } from './core/checkpoint.js';
+export { recordCheckpoint, buildActiveFileSymbolMap, pruneSessions, pruneSessionLog } from './core/checkpoint.js';
+export { runDoctor } from './core/doctor.js';
 export { costReport } from './core/cost.js';
 export { where, formatWhere } from './core/where.js';
 export { detectPromptInjection, assertNotPoisoned, sanitizeUntrustedInput } from './security/poisoning.js';
 export { findSecrets, assertNoSecrets, redactSecrets, calculateShannonEntropy } from './security/secrets.js';
 export { getSecurityContext, canReadResource, canWriteResource, assertReadAccess, assertWriteAccess } from './security/isolation.js';
 export { authenticateRequest, checkAuthorization, getAuthConfig } from './security/auth.js';
-export { hybridSearch, formatHybridHitsCompact, extractTechnicalIdentifiers } from './core/hybrid-retrieval.js';
+export { hybridSearch, formatHybridHitsCompact, extractTechnicalIdentifiers, expandQueryFromCorpus } from './core/hybrid-retrieval.js';
 export { getOrGenerateEmbedding, cosineSimilarity, hashContent } from './core/embeddings.js';
 export { SqliteMemoryStore, getSharedSqliteStore, closeSharedSqliteStore } from './core/sqlite-store.js';
 export { detectConflicts, supersedeMemory, deprecateMemory, isMemoryExpired } from './core/conflict.js';
