@@ -259,7 +259,7 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
   return landmarks;
 }
 
-const LANDMARK_CACHE_VERSION = 3;
+const LANDMARK_CACHE_VERSION = 4;
 
 export interface CacheRecord {
   v?: number;
@@ -281,15 +281,47 @@ export interface LandmarksCacheStore {
   otherFiles: Record<string, OtherFileRecord>;
 }
 
+type CompactLandmarkTuple = [string, number, number, 0 | 1];
+const KIND_TO_CODE: Record<Landmark['kind'], number> = {
+  class: 0,
+  method: 1,
+  function: 2,
+  section: 3,
+  interface: 4,
+  type: 5,
+  const: 6,
+};
+const CODE_TO_KIND: Landmark['kind'][] = ['class', 'method', 'function', 'section', 'interface', 'type', 'const'];
+
+interface SerializedLandmarksCache {
+  v: number;
+  files: Record<string, [number, number, number, CompactLandmarkTuple[]]>;
+  otherFiles: Record<string, [number, number]>;
+}
+
+const memoryCacheByPath = new Map<string, { mtimeMs: number; size: number; store: LandmarksCacheStore }>();
+
 export function landmarksCachePath(recallDir: string): string {
   return path.join(recallDir, '.cache', 'landmarks-cache.json');
 }
 
 export function loadLandmarksCache(recallDir: string): LandmarksCacheStore | null {
   const cacheFile = landmarksCachePath(recallDir);
-  if (!fs.existsSync(cacheFile)) return null;
+  let stat: fs.Stats;
   try {
-    const parsed = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) as Partial<LandmarksCacheStore>;
+    stat = fs.statSync(cacheFile);
+  } catch {
+    memoryCacheByPath.delete(cacheFile);
+    return null;
+  }
+
+  const memHit = memoryCacheByPath.get(cacheFile);
+  if (memHit && memHit.mtimeMs === stat.mtimeMs && memHit.size === stat.size) {
+    return memHit.store;
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) as Partial<SerializedLandmarksCache>;
     if (
       parsed &&
       parsed.v === LANDMARK_CACHE_VERSION &&
@@ -298,10 +330,34 @@ export function loadLandmarksCache(recallDir: string): LandmarksCacheStore | nul
       parsed.otherFiles &&
       typeof parsed.otherFiles === 'object'
     ) {
-      return parsed as LandmarksCacheStore;
+      const files: Record<string, CacheRecord> = {};
+      for (const [rel, tup] of Object.entries(parsed.files)) {
+        if (!Array.isArray(tup) || tup.length < 4) continue;
+        const [size, mtimeMs, totalLines, lms] = tup;
+        files[rel] = {
+          v: LANDMARK_CACHE_VERSION,
+          size,
+          mtimeMs,
+          totalLines,
+          landmarks: lms.map(([name, kindCode, line, exp]) => ({
+            name,
+            kind: CODE_TO_KIND[kindCode] ?? 'function',
+            line,
+            ...(exp === 1 ? { exported: true } : {}),
+          })),
+        };
+      }
+      const otherFiles: Record<string, OtherFileRecord> = {};
+      for (const [rel, tup] of Object.entries(parsed.otherFiles)) {
+        if (!Array.isArray(tup) || tup.length < 2) continue;
+        otherFiles[rel] = { size: tup[0], mtimeMs: tup[1] };
+      }
+      const store: LandmarksCacheStore = { v: LANDMARK_CACHE_VERSION, files, otherFiles };
+      memoryCacheByPath.set(cacheFile, { mtimeMs: stat.mtimeMs, size: stat.size, store });
+      return store;
     }
   } catch {
-    // ignore corrupt or older v2 cache
+    // ignore corrupt or older cache version
   }
   return null;
 }
@@ -311,7 +367,24 @@ export function saveLandmarksCache(recallDir: string, store: LandmarksCacheStore
   try {
     const cacheDir = path.dirname(cacheFile);
     if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-    fs.writeFileSync(cacheFile, JSON.stringify(store), 'utf8');
+
+    const files: SerializedLandmarksCache['files'] = {};
+    for (const [rel, rec] of Object.entries(store.files)) {
+      files[rel] = [
+        rec.size ?? 0,
+        rec.mtimeMs,
+        rec.totalLines,
+        rec.landmarks.map((lm) => [lm.name, KIND_TO_CODE[lm.kind] ?? 2, lm.line, lm.exported ? 1 : 0]),
+      ];
+    }
+    const otherFiles: SerializedLandmarksCache['otherFiles'] = {};
+    for (const [rel, rec] of Object.entries(store.otherFiles)) {
+      otherFiles[rel] = [rec.size, rec.mtimeMs];
+    }
+    const serialized: SerializedLandmarksCache = { v: LANDMARK_CACHE_VERSION, files, otherFiles };
+    fs.writeFileSync(cacheFile, JSON.stringify(serialized), 'utf8');
+    const st = fs.statSync(cacheFile);
+    memoryCacheByPath.set(cacheFile, { mtimeMs: st.mtimeMs, size: st.size, store });
   } catch {
     // ignore cache write failures
   }

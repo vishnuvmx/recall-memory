@@ -418,7 +418,7 @@ export function hybridSearch(
   // Precompute max values for Min-Max normalization and ranks for RRF
   const maxExact = Math.max(1, ...candidates.map((c) => c.exactScore));
   const maxBm25 = Math.max(1, ...candidates.map((c) => c.bm25Score));
-  const maxExpansion = Math.max(1, ...candidates.map((c) => c.expansionScore));
+  const maxExpansion = Math.max(2.5, ...candidates.map((c) => c.expansionScore));
   const maxVector = Math.max(1, ...candidates.map((c) => c.vectorScore));
 
   const rankBy = (getter: (c: CandidateFeatures) => number): Map<string, number> => {

@@ -530,12 +530,15 @@ export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): S
   //    - Dirty Git repo with unchanged HEAD & valid v3 cache -> update ONLY the modified files (0 directory walks)!
   //    - Non-git repo or cold cache -> 1 single incremental pass (down from 4 walks!).
   const currentGitHead = isGitRepo ? (gitHeadSha(root) ?? undefined) : undefined;
-  const cachedCodeFiles = !opts.force ? readCachedLandmarks(recallDir, 1, Number.POSITIVE_INFINITY, 16) : null;
-
   let exportedSurfaceChanged = false;
   let preloadedCodeFiles: FileLandmarks[] | undefined;
 
-  if (isGitRepo && cachedCodeFiles && currentGitHead && fpBefore.gitHead === currentGitHead && !opts.force) {
+  const cachedCodeFiles =
+    isGitRepo && currentGitHead && fpBefore.gitHead === currentGitHead && !opts.force
+      ? readCachedLandmarks(recallDir, 1, Number.POSITIVE_INFINITY, 16)
+      : null;
+
+  if (cachedCodeFiles) {
     if (modifiedFiles.length === 0) {
       // Zero code changes in clean git workspace!
       preloadedCodeFiles = cachedCodeFiles;
