@@ -40,6 +40,25 @@ export function gitInfo(cwd: string): GitInfo {
 /** Returns current HEAD commit SHA if inside a git repository, otherwise null. */
 export function gitHeadSha(root: string): string | null {
   if (!hasGitDir(root)) return null;
+  // Fast-path: read `.git/HEAD` (and symbolic ref file) directly in ~0.1ms instead of spawning `git rev-parse` (~50ms on Windows)
+  try {
+    const gitDir = path.join(root, '.git');
+    if (fs.existsSync(gitDir) && fs.statSync(gitDir).isDirectory()) {
+      const headRaw = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+      if (headRaw.startsWith('ref:')) {
+        const refRel = headRaw.slice(4).trim();
+        const refFile = path.join(gitDir, ...refRel.split('/'));
+        if (fs.existsSync(refFile)) {
+          const sha = fs.readFileSync(refFile, 'utf8').trim();
+          if (/^[0-9a-f]{7,40}$/i.test(sha)) return sha.slice(0, 7);
+        }
+      } else if (/^[0-9a-f]{7,40}$/i.test(headRaw)) {
+        return headRaw.slice(0, 7);
+      }
+    }
+  } catch {
+    // Fall back to `git rev-parse` for worktrees, submodules, or packed-refs
+  }
   const r = run(['rev-parse', '--short', 'HEAD'], root);
   return r.ok ? r.out.trim() || null : null;
 }
@@ -53,24 +72,34 @@ export function recallChanges(root: string, recallRel = '.recall'): string[] | n
 }
 
 /** Uncommitted changed file paths across the repository (excluding .recall). */
-export function repoChanges(root: string): string[] | null {
+export function repoChanges(root: string, opts: { includeRenameOriginals?: boolean } = {}): string[] | null {
   if (!hasGitDir(root)) return null;
   const r = run(['status', '--porcelain', '-uall'], root);
   if (!r.ok) return null;
   const files: string[] = [];
-  for (const line of r.out.split('\n')) {
-    if (!line || line.length < 4) continue;
-    // Porcelain v1 format is: XY <path> or XY <orig> -> <new>
-    let p = line.slice(3).trim();
-    if (p.includes(' -> ')) {
-      p = p.split(' -> ')[1]!.trim();
-    }
+  const pushNorm = (raw: string): void => {
+    let p = raw.trim();
     if (p.startsWith('"') && p.endsWith('"')) {
       p = p.slice(1, -1);
     }
     const normalized = p.replace(/\\/g, '/');
-    if (!normalized.startsWith('.recall/') && normalized !== '.recall') {
+    if (normalized && !normalized.startsWith('.recall/') && normalized !== '.recall') {
       files.push(normalized);
+    }
+  };
+
+  for (const line of r.out.split('\n')) {
+    if (!line || line.length < 4) continue;
+    // Porcelain v1 format is: XY <path> or XY <orig> -> <new>
+    const body = line.slice(3).trim();
+    if (body.includes(' -> ')) {
+      const [origPath, newPath] = body.split(' -> ');
+      if (opts.includeRenameOriginals && origPath) {
+        pushNorm(origPath);
+      }
+      if (newPath) pushNorm(newPath);
+    } else {
+      pushNorm(body);
     }
   }
   return [...new Set(files)];

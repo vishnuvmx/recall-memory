@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -693,6 +693,159 @@ test('Stage 3: Incremental symbol extraction (class methods, typed arrows, const
     assert.equal(kwHits.length, 0, 'Expired memories must be excluded from keyword-only search');
   });
 });
+
+test('Stage 3 Verification (Check B): Cache correctness across uncommitted edits, reverts, untracked files, renames/deletes, branch switches, .gitignore edits, cache deletion, and preserved mtime', () => {
+  makeTempProject((dir) => {
+    const runGit = (args) =>
+      execFileSync('git', args, {
+        cwd: dir,
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+
+    runGit(['init']);
+    runGit(['config', 'user.email', 'test@recall.local']);
+    runGit(['config', 'user.name', 'Recall Test']);
+
+    fs.mkdirSync(path.join(dir, 'src', 'core'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'src', 'generated'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\ndist/\n', 'utf8');
+    fs.writeFileSync(
+      path.join(dir, 'src', 'core', 'alpha.ts'),
+      'export function alphaOrigin(): number {\n  return 1;\n}\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(dir, 'src', 'generated', 'gen-client.ts'),
+      'export function generatedClientApi(): string {\n  return "ok";\n}\n',
+      'utf8',
+    );
+
+    initProject(dir);
+    agentRemember(dir, {
+      title: 'Cache durability anchor memory',
+      type: 'decision',
+      tags: ['cache', 'durability'],
+      text: 'Durable memory must survive cache deletion and rebuild seamlessly.',
+    });
+
+    runGit(['add', '.']);
+    runGit(['commit', '-m', 'Initial commit']);
+    syncWorkspace(dir);
+
+    assert.equal(whereIs(dir, 'alphaOrigin')[0]?.line, 1);
+    assert.equal(whereIs(dir, 'generatedClientApi')[0]?.file, 'src/generated/gen-client.ts');
+
+    // 1. File content changes without a Git commit + revert via git checkout
+    const alphaPath = path.join(dir, 'src', 'core', 'alpha.ts');
+    fs.writeFileSync(
+      alphaPath,
+      '// uncommitted line 1\n// uncommitted line 2\nexport function alphaOrigin(): number {\n  return 2;\n}\nexport function alphaUncommitted(): boolean {\n  return true;\n}\n',
+      'utf8',
+    );
+    syncWorkspace(dir);
+    assert.equal(whereIs(dir, 'alphaOrigin')[0]?.line, 3);
+    assert.equal(whereIs(dir, 'alphaUncommitted')[0]?.line, 6);
+
+    // Revert back to HEAD without commit -> git status becomes clean while HEAD is unchanged
+    runGit(['checkout', '--', 'src/core/alpha.ts']);
+    syncWorkspace(dir);
+    assert.equal(whereIs(dir, 'alphaOrigin')[0]?.line, 1, 'Reverted file must restore line 1 in cache');
+    assert.equal(whereIs(dir, 'alphaUncommitted').length, 0, 'Symbol from reverted file must be evicted');
+
+    // 2. Untracked files
+    const untrackedPath = path.join(dir, 'src', 'core', 'untracked-new.ts');
+    fs.writeFileSync(untrackedPath, 'export function untrackedSymbolFn(): void {}\n', 'utf8');
+    syncWorkspace(dir);
+    assert.equal(whereIs(dir, 'untrackedSymbolFn')[0]?.file, 'src/core/untracked-new.ts');
+    fs.rmSync(untrackedPath);
+    syncWorkspace(dir);
+    assert.equal(whereIs(dir, 'untrackedSymbolFn').length, 0, 'Deleted untracked file must be evicted');
+
+    // 3. Staged rename (`git mv`) and file deletion
+    runGit(['mv', 'src/core/alpha.ts', 'src/core/alpha-renamed.ts']);
+    syncWorkspace(dir);
+    assert.equal(whereIs(dir, 'alphaOrigin')[0]?.file, 'src/core/alpha-renamed.ts');
+    assert.equal(whereIs(dir, 'alpha.ts').length, 0, 'Old renamed filename must be evicted from cache');
+    // Restore back to alpha.ts for subsequent checks
+    runGit(['mv', 'src/core/alpha-renamed.ts', 'src/core/alpha.ts']);
+    syncWorkspace(dir);
+    assert.equal(whereIs(dir, 'alphaOrigin')[0]?.file, 'src/core/alpha.ts');
+
+    // 4. Branch switches
+    const mainBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD']).trim();
+    runGit(['checkout', '-b', 'feature/branch-check']);
+    fs.writeFileSync(
+      path.join(dir, 'src', 'core', 'branch-only.ts'),
+      'export function featureBranchOnlyFn(): string { return "branch"; }\n',
+      'utf8',
+    );
+    runGit(['add', 'src/core/branch-only.ts']);
+    runGit(['commit', '-m', 'Add feature branch file']);
+    syncWorkspace(dir);
+    assert.equal(whereIs(dir, 'featureBranchOnlyFn')[0]?.file, 'src/core/branch-only.ts');
+
+    runGit(['checkout', mainBranch]);
+    syncWorkspace(dir);
+    assert.equal(
+      whereIs(dir, 'featureBranchOnlyFn').length,
+      0,
+      'Switching back to main branch must evict symbols that only exist on feature branch',
+    );
+
+    // 5. Changes to `.gitignore` (newly ignore `src/generated/`, then un-ignore it)
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\ndist/\nsrc/generated/\n', 'utf8');
+    syncWorkspace(dir);
+    assert.equal(
+      whereIs(dir, 'generatedClientApi').length,
+      0,
+      'Adding src/generated/ to .gitignore must evict its symbols from cache',
+    );
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'node_modules/\ndist/\n', 'utf8');
+    assert.equal(
+      whereIs(dir, 'generatedClientApi')[0]?.file,
+      'src/generated/gen-client.ts',
+      'Removing src/generated/ from .gitignore must re-index its symbols automatically on whereIs()',
+    );
+
+    // 6. Cache deletion (`.recall/.cache`) and full automatic reconstruction
+    closeSharedSqliteStore(path.join(dir, '.recall'));
+    fs.rmSync(path.join(dir, '.recall', '.cache'), { recursive: true, force: true });
+    assert.equal(fs.existsSync(path.join(dir, '.recall', '.cache')), false);
+    assert.equal(whereIs(dir, 'alphaOrigin')[0]?.file, 'src/core/alpha.ts');
+    assert.ok(context(dir, 'Cache durability anchor memory').length > 0);
+    assert.equal(fs.existsSync(path.join(dir, '.recall', '.cache', 'landmarks-cache.json')), true);
+    assert.equal(fs.existsSync(path.join(dir, '.recall', '.cache', 'recall.db')), true);
+
+    // 7. File whose timestamp (`mtimeMs`) is preserved via `utimesSync` while contents change (IDENTICAL byte size!)
+    const preservedPath = path.join(dir, 'src', 'core', 'alpha.ts');
+    const origContent = 'export function alphaOrigin(): number {\n  return 1;\n}\n';
+    const sameLenNew = 'export function omegaMutate(): number {\n  return 9;\n}\n';
+    assert.equal(Buffer.byteLength(origContent, 'utf8'), Buffer.byteLength(sameLenNew, 'utf8'));
+    const statBefore = fs.statSync(preservedPath);
+
+    // Wait briefly so kernel ctimeMs advances past original timestamp, then write same-length content & restore mtime
+    const waitUntil = Date.now() + 30;
+    while (Date.now() < waitUntil) {
+      // spin 30ms synchronously to cross OS timer tick
+    }
+    fs.writeFileSync(preservedPath, sameLenNew, 'utf8');
+    fs.utimesSync(preservedPath, statBefore.atime, statBefore.mtime);
+
+    // Warm whereIs() must detect the preserved-mtime content change via ctimeMs!
+    assert.equal(
+      whereIs(dir, 'alphaOrigin').length,
+      0,
+      'Old symbol must disappear when file content changes with preserved mtime and identical size',
+    );
+    assert.equal(
+      whereIs(dir, 'omegaMutate')[0]?.line,
+      1,
+      'New symbol must be found even when file mtime and byte size were preserved',
+    );
+  });
+});
+
 
 
 

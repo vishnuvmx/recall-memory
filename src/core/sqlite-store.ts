@@ -557,9 +557,13 @@ const sharedStores = new Map<string, SqliteMemoryStore>();
 
 export function getSharedSqliteStore(recallDir: string): SqliteMemoryStore {
   const key = path.resolve(recallDir);
-  const existing = sharedStores.get(key);
-  if (existing) return existing;
   const dbPath = path.join(key, '.cache', 'recall.db');
+  const existing = sharedStores.get(key);
+  if (existing) {
+    if (fs.existsSync(dbPath)) return existing;
+    existing.close();
+    sharedStores.delete(key);
+  }
   const store = new SqliteMemoryStore(dbPath);
   sharedStores.set(key, store);
   return store;

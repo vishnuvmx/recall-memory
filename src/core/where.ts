@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  computeGitignoreStatKey,
   extractLandmarks,
+  isCacheStatFresh,
   loadLandmarksCache,
   saveLandmarksCache,
   syncLandmarksIncremental,
@@ -18,7 +20,11 @@ export interface WhereHit {
 }
 
 function tokenizeQuery(q: string): string[] {
-  // Split spaces, slashes, punctuation, AND camelCase boundaries (e.g. "token service" -> ["token", "service"])
+  // Don't split explicit filename queries (e.g. "alpha.ts") across the dot extension into ["alpha", "ts"]
+  if (!/\s/.test(q) && /\.[a-z0-9]{1,5}$/i.test(q)) {
+    return [q.toLowerCase()];
+  }
+  // Split spaces, slashes, underscores, hyphens, and camelCase boundaries ("token service" -> ["token", "service"])
   return q
     .replace(/([a-z])([A-Z])/g, '$1 $2')
     .toLowerCase()
@@ -109,6 +115,12 @@ export function where(root: string, recallDir: string, query: string, limit = 15
   let store = loadLandmarksCache(recallDir);
   let wasWarm = store !== null;
 
+  // Invalidate warm cache if `.gitignore` rules changed on disk (1 statSync)
+  if (store && store.gitignoreStat !== computeGitignoreStatKey(root)) {
+    store = null;
+    wasWarm = false;
+  }
+
   if (!store) {
     store = syncLandmarksIncremental(root, recallDir).store;
     wasWarm = false;
@@ -116,7 +128,7 @@ export function where(root: string, recallDir: string, query: string, limit = 15
 
   let ranked = queryStore(store, qLower, queryTokens);
 
-  // If warm cache found nothing, perform one incremental refresh in case a new file was added
+  // If warm cache found nothing, perform one incremental refresh in case a new file or preserved-mtime edit occurred
   if (wasWarm && ranked.length === 0) {
     store = syncLandmarksIncremental(root, recallDir).store;
     wasWarm = false;
@@ -152,7 +164,7 @@ export function where(root: string, recallDir: string, query: string, limit = 15
       }
 
       const codeRec = store.files[rel];
-      if (codeRec && (codeRec.mtimeMs !== stat.mtimeMs || codeRec.size !== stat.size)) {
+      if (codeRec && !isCacheStatFresh(codeRec, stat, true)) {
         try {
           const content = fs.readFileSync(fullPath, 'utf8');
           const ext = path.extname(rel).toLowerCase();
@@ -160,6 +172,7 @@ export function where(root: string, recallDir: string, query: string, limit = 15
             v: store.v,
             size: stat.size,
             mtimeMs: stat.mtimeMs,
+            ctimeMs: stat.ctimeMs,
             totalLines: content.split('\n').length,
             landmarks: extractLandmarks(content, ext),
           };

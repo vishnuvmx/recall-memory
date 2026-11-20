@@ -5,7 +5,7 @@ import { initialCurrentStateMarkdown } from './checkpoint.js';
 import { defaultConfig, loadConfig, writeConfig, configPath } from './config.js';
 import { gitHeadSha } from './git.js';
 import { rebuildIndex } from './index-builder.js';
-import { syncLandmarksIncremental } from './landmarks.js';
+import { computeGitignoreStatKey, syncLandmarksIncremental } from './landmarks.js';
 import { generateProjectMap } from './mapper.js';
 import { computeRecallFilesStatKey, loadSearchableMemories } from './memory.js';
 import { computeManifestStatKey, loadFingerprint, saveFingerprint, syncPassport } from './passport.js';
@@ -98,6 +98,7 @@ export function initProject(
     memoriesHash: computeMemoriesDigest(searchable),
     memoriesStatKey: filesStatKey,
     manifestStatKey: computeManifestStatKey(root),
+    gitignoreStatKey: computeGitignoreStatKey(root),
     gitHead: gitHeadSha(root) ?? undefined,
   });
 

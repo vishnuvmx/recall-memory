@@ -19,7 +19,9 @@ export interface WorkspaceFingerprint {
   memoriesHash?: string;
   memoriesStatKey?: string;
   manifestStatKey?: string;
+  gitignoreStatKey?: string;
   gitHead?: string;
+  lastModifiedFiles?: string[];
   lastChatTurnHash?: string;
   lastConversationId?: string;
 }

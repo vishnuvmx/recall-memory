@@ -135,7 +135,7 @@ export function computeRecallFilesStatKey(recallDir: string): string {
   try {
     if (fs.existsSync(memMd)) {
       const st = fs.statSync(memMd);
-      parts.push(`M:${st.size}:${Math.floor(st.mtimeMs)}`);
+      parts.push(`M:${st.size}:${Math.floor(st.mtimeMs)}:${Math.floor(st.ctimeMs)}`);
     }
   } catch {
     // ignore
@@ -147,7 +147,7 @@ export function computeRecallFilesStatKey(recallDir: string): string {
       const names = fs.readdirSync(dir).filter((n) => n.toLowerCase().endsWith('.md')).sort();
       for (const n of names) {
         const st = fs.statSync(path.join(dir, n));
-        parts.push(`${sub}/${n}:${st.size}:${Math.floor(st.mtimeMs)}`);
+        parts.push(`${sub}/${n}:${st.size}:${Math.floor(st.mtimeMs)}:${Math.floor(st.ctimeMs)}`);
       }
     } catch {
       // ignore

@@ -259,12 +259,13 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
   return landmarks;
 }
 
-const LANDMARK_CACHE_VERSION = 4;
+const LANDMARK_CACHE_VERSION = 5;
 
 export interface CacheRecord {
   v?: number;
   size?: number;
   mtimeMs: number;
+  ctimeMs?: number;
   totalLines: number;
   landmarks: Landmark[];
 }
@@ -272,13 +273,39 @@ export interface CacheRecord {
 export interface OtherFileRecord {
   size: number;
   mtimeMs: number;
+  ctimeMs?: number;
   totalLines?: number;
 }
 
 export interface LandmarksCacheStore {
   v: number;
+  gitignoreStat: string;
   files: Record<string, CacheRecord>;
   otherFiles: Record<string, OtherFileRecord>;
+}
+
+/** Fast stat-only key for `.gitignore` (catches changes to ignore rules in 1 statSync call). */
+export function computeGitignoreStatKey(root: string): string {
+  const file = path.join(root, '.gitignore');
+  try {
+    const st = fs.statSync(file);
+    return `${st.size}:${Math.floor(st.mtimeMs)}:${Math.floor(st.ctimeMs)}`;
+  } catch {
+    return 'none';
+  }
+}
+
+export function isCacheStatFresh(
+  cached: { size?: number; mtimeMs: number; ctimeMs?: number; v?: number } | undefined,
+  stat: fs.Stats,
+  requireVersion = false,
+): boolean {
+  if (!cached) return false;
+  if (requireVersion && cached.v !== LANDMARK_CACHE_VERSION) return false;
+  if (cached.size !== stat.size) return false;
+  if (Math.floor(cached.mtimeMs) !== Math.floor(stat.mtimeMs)) return false;
+  if (cached.ctimeMs !== undefined && Math.floor(cached.ctimeMs) !== Math.floor(stat.ctimeMs)) return false;
+  return true;
 }
 
 type CompactLandmarkTuple = [string, number, number, 0 | 1];
@@ -295,11 +322,12 @@ const CODE_TO_KIND: Landmark['kind'][] = ['class', 'method', 'function', 'sectio
 
 interface SerializedLandmarksCache {
   v: number;
-  files: Record<string, [number, number, number, CompactLandmarkTuple[]]>;
-  otherFiles: Record<string, [number, number]>;
+  gitignoreStat: string;
+  files: Record<string, [number, number, number, number, CompactLandmarkTuple[]]>;
+  otherFiles: Record<string, [number, number, number]>;
 }
 
-const memoryCacheByPath = new Map<string, { mtimeMs: number; size: number; store: LandmarksCacheStore }>();
+const memoryCacheByPath = new Map<string, { mtimeMs: number; ctimeMs: number; size: number; store: LandmarksCacheStore }>();
 
 export function landmarksCachePath(recallDir: string): string {
   return path.join(recallDir, '.cache', 'landmarks-cache.json');
@@ -316,7 +344,12 @@ export function loadLandmarksCache(recallDir: string): LandmarksCacheStore | nul
   }
 
   const memHit = memoryCacheByPath.get(cacheFile);
-  if (memHit && memHit.mtimeMs === stat.mtimeMs && memHit.size === stat.size) {
+  if (
+    memHit &&
+    memHit.mtimeMs === stat.mtimeMs &&
+    memHit.ctimeMs === stat.ctimeMs &&
+    memHit.size === stat.size
+  ) {
     return memHit.store;
   }
 
@@ -325,6 +358,7 @@ export function loadLandmarksCache(recallDir: string): LandmarksCacheStore | nul
     if (
       parsed &&
       parsed.v === LANDMARK_CACHE_VERSION &&
+      typeof parsed.gitignoreStat === 'string' &&
       parsed.files &&
       typeof parsed.files === 'object' &&
       parsed.otherFiles &&
@@ -332,12 +366,13 @@ export function loadLandmarksCache(recallDir: string): LandmarksCacheStore | nul
     ) {
       const files: Record<string, CacheRecord> = {};
       for (const [rel, tup] of Object.entries(parsed.files)) {
-        if (!Array.isArray(tup) || tup.length < 4) continue;
-        const [size, mtimeMs, totalLines, lms] = tup;
+        if (!Array.isArray(tup) || tup.length < 5) continue;
+        const [size, mtimeMs, ctimeMs, totalLines, lms] = tup;
         files[rel] = {
           v: LANDMARK_CACHE_VERSION,
           size,
           mtimeMs,
+          ctimeMs,
           totalLines,
           landmarks: lms.map(([name, kindCode, line, exp]) => ({
             name,
@@ -349,11 +384,16 @@ export function loadLandmarksCache(recallDir: string): LandmarksCacheStore | nul
       }
       const otherFiles: Record<string, OtherFileRecord> = {};
       for (const [rel, tup] of Object.entries(parsed.otherFiles)) {
-        if (!Array.isArray(tup) || tup.length < 2) continue;
-        otherFiles[rel] = { size: tup[0], mtimeMs: tup[1] };
+        if (!Array.isArray(tup) || tup.length < 3) continue;
+        otherFiles[rel] = { size: tup[0], mtimeMs: tup[1], ctimeMs: tup[2] };
       }
-      const store: LandmarksCacheStore = { v: LANDMARK_CACHE_VERSION, files, otherFiles };
-      memoryCacheByPath.set(cacheFile, { mtimeMs: stat.mtimeMs, size: stat.size, store });
+      const store: LandmarksCacheStore = {
+        v: LANDMARK_CACHE_VERSION,
+        gitignoreStat: parsed.gitignoreStat,
+        files,
+        otherFiles,
+      };
+      memoryCacheByPath.set(cacheFile, { mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, size: stat.size, store });
       return store;
     }
   } catch {
@@ -373,18 +413,24 @@ export function saveLandmarksCache(recallDir: string, store: LandmarksCacheStore
       files[rel] = [
         rec.size ?? 0,
         rec.mtimeMs,
+        rec.ctimeMs ?? rec.mtimeMs,
         rec.totalLines,
         rec.landmarks.map((lm) => [lm.name, KIND_TO_CODE[lm.kind] ?? 2, lm.line, lm.exported ? 1 : 0]),
       ];
     }
     const otherFiles: SerializedLandmarksCache['otherFiles'] = {};
     for (const [rel, rec] of Object.entries(store.otherFiles)) {
-      otherFiles[rel] = [rec.size, rec.mtimeMs];
+      otherFiles[rel] = [rec.size, rec.mtimeMs, rec.ctimeMs ?? rec.mtimeMs];
     }
-    const serialized: SerializedLandmarksCache = { v: LANDMARK_CACHE_VERSION, files, otherFiles };
+    const serialized: SerializedLandmarksCache = {
+      v: LANDMARK_CACHE_VERSION,
+      gitignoreStat: store.gitignoreStat,
+      files,
+      otherFiles,
+    };
     fs.writeFileSync(cacheFile, JSON.stringify(serialized), 'utf8');
     const st = fs.statSync(cacheFile);
-    memoryCacheByPath.set(cacheFile, { mtimeMs: st.mtimeMs, size: st.size, store });
+    memoryCacheByPath.set(cacheFile, { mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, size: st.size, store });
   } catch {
     // ignore cache write failures
   }
@@ -460,10 +506,18 @@ export function syncLandmarksIncremental(
   const maxFiles = opts.maxFiles ?? Number.POSITIVE_INFINITY;
   const maxSymbols = opts.maxSymbols ?? Number.POSITIVE_INFINITY;
 
+  const currentGitignoreStat = computeGitignoreStatKey(root);
   const existingStore = recallDir ? loadLandmarksCache(recallDir) : null;
-  const store: LandmarksCacheStore = existingStore ?? { v: LANDMARK_CACHE_VERSION, files: {}, otherFiles: {} };
+  const gitignoreChanged = !existingStore || existingStore.gitignoreStat !== currentGitignoreStat;
+  const store: LandmarksCacheStore = existingStore ?? {
+    v: LANDMARK_CACHE_VERSION,
+    gitignoreStat: currentGitignoreStat,
+    files: {},
+    otherFiles: {},
+  };
+  store.gitignoreStat = currentGitignoreStat;
 
-  let cacheDirty = !existingStore;
+  let cacheDirty = !existingStore || gitignoreChanged;
   let changedCount = 0;
   let deletedCount = 0;
   let exportedSurfaceChanged = !existingStore;
@@ -507,7 +561,7 @@ export function syncLandmarksIncremental(
     const ext = path.extname(base).toLowerCase();
     if (SUPPORTED_EXTS.has(ext)) {
       const cached = store.files[rel];
-      if (!cached || cached.v !== LANDMARK_CACHE_VERSION || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+      if (!isCacheStatFresh(cached, stat, true)) {
         const oldSig = cached ? exportedSignature(cached.landmarks) : '';
         const content = fs.readFileSync(fullPath, 'utf8');
         const linesCount = content.split('\n').length;
@@ -520,6 +574,7 @@ export function syncLandmarksIncremental(
           v: LANDMARK_CACHE_VERSION,
           size: stat.size,
           mtimeMs: stat.mtimeMs,
+          ctimeMs: stat.ctimeMs,
           totalLines: linesCount,
           landmarks,
         };
@@ -528,16 +583,16 @@ export function syncLandmarksIncremental(
       }
     } else {
       const cached = store.otherFiles[rel];
-      if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
-        store.otherFiles[rel] = { size: stat.size, mtimeMs: stat.mtimeMs };
+      if (!isCacheStatFresh(cached, stat, false)) {
+        store.otherFiles[rel] = { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
         changedCount++;
         cacheDirty = true;
       }
     }
   };
 
-  // Fast-path: caller already knows exact changed paths (e.g., from git status) and v3 cache exists
-  if (existingStore && opts.changedFiles) {
+  // Fast-path: caller already knows exact changed paths (e.g., from git status) and .gitignore hasn't changed
+  if (existingStore && !gitignoreChanged && opts.changedFiles) {
     if (opts.changedFiles.length > 0) {
       const isGitignored = createGitignoreFilter(root);
       for (const rawRel of opts.changedFiles) {
@@ -591,7 +646,7 @@ export function syncLandmarksIncremental(
             const stat = fs.statSync(fullPath);
             if (stat.size > 2 * 1024 * 1024) continue;
             const cached = store.files[rel];
-            if (!cached || cached.v !== LANDMARK_CACHE_VERSION || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+            if (!isCacheStatFresh(cached, stat, true)) {
               const oldSig = cached ? exportedSignature(cached.landmarks) : '';
               const content = fs.readFileSync(fullPath, 'utf8');
               const linesCount = content.split('\n').length;
@@ -603,6 +658,7 @@ export function syncLandmarksIncremental(
                 v: LANDMARK_CACHE_VERSION,
                 size: stat.size,
                 mtimeMs: stat.mtimeMs,
+                ctimeMs: stat.ctimeMs,
                 totalLines: linesCount,
                 landmarks,
               };
@@ -618,8 +674,8 @@ export function syncLandmarksIncremental(
             const stat = fs.statSync(fullPath);
             if (stat.size > 2 * 1024 * 1024) continue;
             const cached = store.otherFiles[rel];
-            if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
-              store.otherFiles[rel] = { size: stat.size, mtimeMs: stat.mtimeMs };
+            if (!isCacheStatFresh(cached, stat, false)) {
+              store.otherFiles[rel] = { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
               changedCount++;
               cacheDirty = true;
             }

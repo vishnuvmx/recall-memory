@@ -500,6 +500,16 @@ export function hybridSearch(
   }
 
   const limit = opts.limit ?? 5;
+  if (deduplicatedHits.length === 0) return [];
+
+  // Prune low-signal tail noise (e.g. 1-tag expansion-only siblings scoring <25% of top match)
+  // unless caller explicitly passed a custom minScore threshold.
+  if (opts.minScore === undefined) {
+    const topScore = deduplicatedHits[0]!.score;
+    const cutoff = topScore * 0.25;
+    return deduplicatedHits.filter((h, idx) => idx === 0 || h.score >= cutoff).slice(0, limit);
+  }
+
   return deduplicatedHits.slice(0, limit);
 }
 

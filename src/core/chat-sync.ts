@@ -8,7 +8,7 @@ import { isMemoryExpired } from './conflict.js';
 import { gitHeadSha, hasGitDir, repoChanges } from './git.js';
 import { formatHybridHitsCompact, hybridSearch } from './hybrid-retrieval.js';
 import { rebuildIndex } from './index-builder.js';
-import { readCachedLandmarks, syncLandmarksIncremental, type FileLandmarks } from './landmarks.js';
+import { computeGitignoreStatKey, readCachedLandmarks, syncLandmarksIncremental, type FileLandmarks } from './landmarks.js';
 import { generateProjectMap } from './mapper.js';
 import { computeRecallFilesStatKey, loadAll, loadSearchableMemories, type Memory } from './memory.js';
 import { PASSPORT_BLOCK_NAME, computeManifestStatKey, loadFingerprint, saveFingerprint, syncPassport } from './passport.js';
@@ -461,7 +461,8 @@ export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): S
   let chatCheckpointRecorded = false;
   const fpBefore = loadFingerprint(recallDir);
   const isGitRepo = hasGitDir(root);
-  const modifiedFiles = isGitRepo ? (repoChanges(root) ?? []).slice(0, 20) : [];
+  const allDirtyPaths = isGitRepo ? (repoChanges(root, { includeRenameOriginals: true }) ?? []) : [];
+  const modifiedFiles = allDirtyPaths.slice(0, 20);
   const referencedFiles =
     userPrompt || assistantReply
       ? extractWorkspaceFileReferences(root, `${userPrompt}\n${assistantReply}`)
@@ -526,26 +527,31 @@ export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): S
   }
 
   // 4. Single-pass incremental code symbol index update:
-  //    - Clean Git repo with unchanged HEAD & valid v3 cache -> 0 directory walks, 0 stats!
-  //    - Dirty Git repo with unchanged HEAD & valid v3 cache -> update ONLY the modified files (0 directory walks)!
-  //    - Non-git repo or cold cache -> 1 single incremental pass (down from 4 walks!).
+  //    - Clean Git repo with unchanged HEAD, unchanged .gitignore, unchanged dirty list & valid cache -> 0 directory walks!
+  //    - Dirty/reverted Git repo with unchanged HEAD & unchanged .gitignore -> update ONLY changed + previously dirty files (0 directory walks)!
+  //    - Branch switch, .gitignore edit, non-git repo, or cold cache -> 1 single incremental pass.
   const currentGitHead = isGitRepo ? (gitHeadSha(root) ?? undefined) : undefined;
+  const currentGitignoreStat = computeGitignoreStatKey(root);
+  const gitignoreChanged = fpBefore.gitignoreStatKey !== currentGitignoreStat;
   let exportedSurfaceChanged = false;
   let preloadedCodeFiles: FileLandmarks[] | undefined;
 
+  const prevDirty = fpBefore.lastModifiedFiles ?? [];
+  const gitFilesToSync = [...new Set([...allDirtyPaths, ...prevDirty])];
+
   const cachedCodeFiles =
-    isGitRepo && currentGitHead && fpBefore.gitHead === currentGitHead && !opts.force
+    isGitRepo && currentGitHead && fpBefore.gitHead === currentGitHead && !gitignoreChanged && !opts.force
       ? readCachedLandmarks(recallDir, 1, Number.POSITIVE_INFINITY, 16)
       : null;
 
   if (cachedCodeFiles) {
-    if (modifiedFiles.length === 0) {
+    if (gitFilesToSync.length === 0) {
       // Zero code changes in clean git workspace!
       preloadedCodeFiles = cachedCodeFiles;
       exportedSurfaceChanged = false;
     } else {
       const inc = syncLandmarksIncremental(root, recallDir, {
-        changedFiles: modifiedFiles,
+        changedFiles: gitFilesToSync,
         minLines: 1,
         maxFiles: Number.POSITIVE_INFINITY,
         maxSymbols: 16,
@@ -597,12 +603,16 @@ export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): S
   }
 
   // 7. Persist fingerprint ONLY when at least one tracked key changed (0 disk writes on unchanged idle turns!)
+  const nextDirtyKey = allDirtyPaths.join('\0');
+  const prevDirtyKey = (fpBefore.lastModifiedFiles ?? []).join('\0');
   const fpChanged =
     fpBefore.passportHash !== nextPassportHash ||
     fpBefore.memoriesHash !== nextMemoriesHash ||
     fpBefore.memoriesStatKey !== currentMemStatKey ||
     fpBefore.manifestStatKey !== currentManifestStatKey ||
+    fpBefore.gitignoreStatKey !== currentGitignoreStat ||
     fpBefore.gitHead !== currentGitHead ||
+    prevDirtyKey !== nextDirtyKey ||
     fpBefore.lastChatTurnHash !== nextChatTurnHash ||
     fpBefore.lastConversationId !== nextConversationId;
 
@@ -613,7 +623,9 @@ export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): S
       memoriesHash: nextMemoriesHash,
       memoriesStatKey: currentMemStatKey,
       manifestStatKey: currentManifestStatKey,
+      gitignoreStatKey: currentGitignoreStat,
       gitHead: currentGitHead,
+      lastModifiedFiles: allDirtyPaths.length > 0 ? allDirtyPaths : undefined,
       lastChatTurnHash: nextChatTurnHash,
       lastConversationId: nextConversationId,
     });

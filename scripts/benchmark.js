@@ -713,6 +713,114 @@ try {
   printWl('Dependency change (syncPassport)', depChangePassport);
 
   // --------------------------------------------------------------------------
+  // B2. Real Git Repository Fast-Path Verification (80-file Git Repo)
+  // --------------------------------------------------------------------------
+  console.log('\n[3b/6] Real Git Repository Fast-Path Benchmark (80-file Committed Git Repo):');
+  const gitFx = buildProjectFixture(path.join(tmpBase, 'git-bench'), 'medium');
+  const gitRoot = gitFx.root;
+  const runGit = (args) =>
+    execFileSync('git', args, {
+      cwd: gitRoot,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+
+  runGit(['init']);
+  runGit(['config', 'user.email', 'bench@recall.local']);
+  runGit(['config', 'user.name', 'Recall Bench']);
+  initProject(gitRoot);
+  runGit(['add', '.']);
+  runGit(['commit', '-m', 'Initial fixture commit']);
+  // Warm up gitHead in fingerprint.json after initial commit
+  processLifecycleHookInput(
+    JSON.stringify({
+      conversationId: 'bench-git-warmup',
+      workspacePaths: [gitRoot],
+      hookEventName: 'Stop',
+      lastUserInput: 'Initial sync after commit',
+      response: 'Synced initial git HEAD.',
+    }),
+    gitRoot,
+  );
+
+  const stopGitClean = measureWorkload(
+    (iter) =>
+      processLifecycleHookInput(
+        JSON.stringify({
+          conversationId: 'bench-git-clean',
+          workspacePaths: [gitRoot],
+          hookEventName: 'Stop',
+          lastUserInput: `Clean git Q&A turn ${iter}: explain architecture`,
+          response: `Clean git reply ${iter}.`,
+        }),
+        gitRoot,
+      ),
+    { iterations: 12, warmup: 2 },
+  );
+  delete stopGitClean.lastResult;
+
+  const gitTargetFile = path.join(gitRoot, 'src', 'auth', 'module-0.ts');
+  const gitTargetOrig = origReadFileSync(gitTargetFile, 'utf8');
+  const stopGitOneFileModified = measureWorkload(
+    (iter) =>
+      processLifecycleHookInput(
+        JSON.stringify({
+          conversationId: 'bench-git-1file',
+          workspacePaths: [gitRoot],
+          hookEventName: 'Stop',
+          lastUserInput: `Edited 1 file in git repo iter ${iter}`,
+          response: `Done editing iter ${iter}.`,
+        }),
+        gitRoot,
+      ),
+    {
+      iterations: 12,
+      warmup: 2,
+      beforeEach: (iter) => {
+        origWriteFileSync(gitTargetFile, `${gitTargetOrig}\n// Git edit iter ${iter}\n`, 'utf8');
+      },
+    },
+  );
+  origWriteFileSync(gitTargetFile, gitTargetOrig, 'utf8');
+  delete stopGitOneFileModified.lastResult;
+
+  const gitUntrackedFile = path.join(gitRoot, 'src', 'auth', 'untracked-feature.ts');
+  const stopGitUntrackedAdded = measureWorkload(
+    (iter) =>
+      processLifecycleHookInput(
+        JSON.stringify({
+          conversationId: 'bench-git-untracked',
+          workspacePaths: [gitRoot],
+          hookEventName: 'Stop',
+          lastUserInput: `Added untracked helper iter ${iter}`,
+          response: `Created helper iter ${iter}.`,
+        }),
+        gitRoot,
+      ),
+    {
+      iterations: 10,
+      warmup: 1,
+      beforeEach: (iter) => {
+        origWriteFileSync(
+          gitUntrackedFile,
+          `export function untrackedHelper${iter}(x: number): number { return x + ${iter}; }\n`,
+          'utf8',
+        );
+      },
+    },
+  );
+  if (fs.existsSync(gitUntrackedFile)) fs.rmSync(gitUntrackedFile, { force: true });
+  delete stopGitUntrackedAdded.lastResult;
+
+  report.workloads.stopGitClean = stopGitClean;
+  report.workloads.stopGitOneFileModified = stopGitOneFileModified;
+  report.workloads.stopGitUntrackedAdded = stopGitUntrackedAdded;
+
+  printWl('Stop Hook [GIT Clean / 0 chg]', stopGitClean);
+  printWl('Stop Hook [GIT Dirty / 1 mod]', stopGitOneFileModified);
+  printWl('Stop Hook [GIT Dirty / +1 new]', stopGitUntrackedAdded);
+
+  // --------------------------------------------------------------------------
   // C. Symbol Lookup (`where` Cold vs. Warm) & Context Retrieval I/O
   // --------------------------------------------------------------------------
   console.log('\n[4/6] Symbol Lookup (`where`) & Context Retrieval Latency / I/O:');
