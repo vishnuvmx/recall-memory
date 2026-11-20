@@ -6,7 +6,6 @@ import type { DatabaseSync as DatabaseSyncType } from 'node:sqlite';
 import type { Memory } from './memory.js';
 import { stemCandidates, tokenize } from './retrieval.js';
 import { globalWriteQueue, withRetry } from './write-queue.js';
-import { getOrGenerateEmbedding, CURRENT_EMBEDDING_MODEL, CURRENT_EMBEDDING_VERSION } from './embeddings.js';
 import type { SecurityContext } from '../security/isolation.js';
 import { canReadResource } from '../security/isolation.js';
 
@@ -179,44 +178,6 @@ export class SqliteMemoryStore {
       tags: JSON.parse(r.tags || '[]'),
       sources: JSON.parse(r.sources || '[]'),
     };
-  }
-
-  private updateEmbeddingInTx(m: Memory): void {
-    const text = `${m.title}\n${(m.tags ?? []).join(' ')}\n${m.body}`;
-    const emb = getOrGenerateEmbedding(text);
-
-    const checkStmt = this.db.prepare('SELECT content_hash, model, version FROM embeddings WHERE id = ?;');
-    const row = checkStmt.get(m.id) as { content_hash: string; model: string; version: number } | undefined;
-
-    // Reuse embedding if content and model version haven't changed
-    if (
-      row &&
-      row.content_hash === emb.contentHash &&
-      row.model === CURRENT_EMBEDDING_MODEL &&
-      row.version === CURRENT_EMBEDDING_VERSION
-    ) {
-      return;
-    }
-
-    const upsertEmb = this.db.prepare(`
-      INSERT INTO embeddings (id, model, version, content_hash, vector, updated)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        model = excluded.model,
-        version = excluded.version,
-        content_hash = excluded.content_hash,
-        vector = excluded.vector,
-        updated = excluded.updated;
-    `);
-
-    upsertEmb.run(
-      m.id,
-      emb.model,
-      emb.version,
-      emb.contentHash,
-      JSON.stringify(emb.vector),
-      new Date().toISOString(),
-    );
   }
 
   private upsertMemoryRowInTx(m: Memory): void {

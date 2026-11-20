@@ -1,6 +1,6 @@
 {
   "name": "@vishnuvmx/recall-memory",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Zero-maintenance, local-first persistent project memory for AI coding agents.",
   "type": "module",
   "license": "MIT",
@@ -34,9 +34,9 @@
   ],
   "files": [
     "dist",
-    "scripts",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "publishConfig": {
     "access": "public"
@@ -49,9 +49,7 @@
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build",
     "test": "node --test tests/*.test.mjs",
-    "sync": "node scripts/recall-sync.js",
-    "watch": "node scripts/recall-sync.js --watch",
-    "context-pack": "node scripts/recall-context-pack.js",
+    "sync": "node dist/cli/index.js sync",
     "preeval": "npm run build",
     "eval": "node scripts/eval.js",
     "prebench": "npm run build",

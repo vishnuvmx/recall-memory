@@ -10,7 +10,7 @@ import {
   type Verification,
 } from '../schemas/index.js';
 import { RecallError, atomicWrite, resolveInside, toPosix, today } from '../utils/fs.js';
-import { assertNoSecrets } from '../utils/secrets.js';
+import { assertNoSecrets } from '../security/secrets.js';
 import { assertNotPoisoned } from '../security/poisoning.js';
 import type { Visibility } from '../schemas/index.js';
 

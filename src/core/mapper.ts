@@ -126,22 +126,6 @@ export function createGitignoreFilter(root: string): (relPath: string, isDir: bo
   };
 }
 
-export function parseGitignore(root: string): Set<string> {
-  const ignoreFile = path.join(root, '.gitignore');
-  const ignores = new Set<string>();
-  if (!fs.existsSync(ignoreFile)) return ignores;
-  const lines = fs.readFileSync(ignoreFile, 'utf8').split('\n');
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const cleaned = trimmed.replace(/^\/+|\/+$/g, '');
-    if (cleaned && !cleaned.includes('*') && !cleaned.includes('/')) {
-      ignores.add(cleaned);
-    }
-  }
-  return ignores;
-}
-
 export interface ScanProjectOptions {
   profile?: ProfileTier;
   recallDir?: string;

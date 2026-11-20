@@ -13,9 +13,8 @@
 - `npm run build` → `tsc -p tsconfig.build.json`
 - `npm run typecheck` → `tsc --noEmit`
 - `npm run test` → `node --test tests/*.test.mjs`
-- `npm run sync` → `node scripts/recall-sync.js`
+- `npm run sync` → `node dist/cli/index.js sync`
 - `npm run bench` → `node scripts/benchmark.js`
-- `npm run context-pack` → `node scripts/recall-context-pack.js`
 - `npm run eval` → `node scripts/eval.js`
 
 ## 3. Non-Volatile Rules, Decisions & Invariants
@@ -48,5 +47,6 @@
 - `src/core/index-builder.ts`: `buildIndexBlock`, `indexPath`, `renderIndex`, `rebuildIndex`, `IndexState`
 - `src/core/init.ts`: `InitReport`, `initProject`
 - `src/core/landmarks.ts`: `Landmark`, `FileLandmarks`, `extractLandmarks`, `CacheRecord`, `OtherFileRecord`
-- _... (24 more modules — query `recall where <name>`)_
+- `src/core/mapper.ts`: `DEFAULT_IGNORED_DIRS`, `TEST_FILE_REGEX`, `DirectoryInfo`, `ProjectMapData`, `createGitignoreFilter`
+- _... (21 more modules — query `recall where <name>`)_
 <!-- recall:passport:end -->

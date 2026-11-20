@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { requireInitialized } from './project.js';
 import { propose } from './service.js';
 import { loadAll, type Memory } from './memory.js';
-import { findSecrets } from '../utils/secrets.js';
+import { findSecrets } from '../security/secrets.js';
 import type { MemoryType } from '../schemas/index.js';
 
 export interface SeedOptions {
