@@ -3,12 +3,14 @@ import path from 'node:path';
 import { installAgentBlock, syncAllAgentIntegrations } from './agent.js';
 import { initialCurrentStateMarkdown } from './checkpoint.js';
 import { defaultConfig, loadConfig, writeConfig, configPath } from './config.js';
+import { gitHeadSha } from './git.js';
 import { rebuildIndex } from './index-builder.js';
+import { syncLandmarksIncremental } from './landmarks.js';
 import { generateProjectMap } from './mapper.js';
-import { loadSearchableMemories } from './memory.js';
-import { syncPassport } from './passport.js';
+import { computeRecallFilesStatKey, loadSearchableMemories } from './memory.js';
+import { computeManifestStatKey, loadFingerprint, saveFingerprint, syncPassport } from './passport.js';
 import { findProject, type Project } from './project.js';
-import { getSharedSqliteStore } from './sqlite-store.js';
+import { computeMemoriesDigest, getSharedSqliteStore } from './sqlite-store.js';
 import { CHANGELOG_MD, MEMORY_MD, RULE_TEMPLATES } from '../templates/index.js';
 import { writeNew } from '../utils/fs.js';
 
@@ -50,7 +52,7 @@ export function initProject(
     created.push('.recall/config.json');
   }
   put('MEMORY.md', MEMORY_MD);
-  put('.gitignore', '# Local ephemeral agent state\n# PROJECT_MAP.md\n# CURRENT_STATE.md\n# sessions/\n.cache/\n');
+  put('.gitignore', '# Local ephemeral agent state (never dirties git status)\nCURRENT_STATE.md\nsessions/\n.cache/\n');
   for (const [name, text] of Object.entries(RULE_TEMPLATES)) put(`rules/${name}`, text);
   put('logs/CHANGELOG.md', CHANGELOG_MD);
   put('CURRENT_STATE.md', initialCurrentStateMarkdown());
@@ -62,23 +64,42 @@ export function initProject(
     ? syncAllAgentIntegrations(root, { agentFile: cfg.agentFile, createMissing: true })
     : undefined;
 
+  // Single memory load + single codebase landmark scan shared across INDEX, PASSPORT, PROJECT_MAP, and SQLite
   const hadIndex = fs.existsSync(path.join(recallDir, 'INDEX.md'));
-  rebuildIndex(recallDir);
+  const loaded = rebuildIndex(recallDir);
   (hadIndex ? skipped : created).push('.recall/INDEX.md');
 
+  const searchable = loadSearchableMemories(recallDir, loaded);
+  const filesStatKey = computeRecallFilesStatKey(recallDir);
+  const landmarkSync = syncLandmarksIncremental(root, recallDir);
+
   const hadPassport = fs.existsSync(path.join(recallDir, 'PASSPORT.md'));
-  syncPassport(root, recallDir, { profile: cfg.profile });
+  const passRes = syncPassport(root, recallDir, {
+    profile: cfg.profile,
+    memories: searchable,
+    preloadedFiles: landmarkSync.files,
+  });
   (hadPassport ? skipped : created).push('.recall/PASSPORT.md');
 
   const hadMap = fs.existsSync(path.join(recallDir, 'PROJECT_MAP.md'));
-  generateProjectMap(root, recallDir, cfg.profile);
+  generateProjectMap(root, recallDir, cfg.profile, landmarkSync.files);
   (hadMap ? skipped : created).push('.recall/PROJECT_MAP.md');
 
   try {
-    getSharedSqliteStore(recallDir).ensureSynced(loadSearchableMemories(recallDir));
+    getSharedSqliteStore(recallDir).ensureSynced(searchable, filesStatKey);
   } catch {
     // Non-fatal fallback when node:sqlite is unavailable
   }
+
+  const fp = loadFingerprint(recallDir);
+  saveFingerprint(recallDir, {
+    ...fp,
+    passportHash: passRes.passportHash,
+    memoriesHash: computeMemoriesDigest(searchable),
+    memoriesStatKey: filesStatKey,
+    manifestStatKey: computeManifestStatKey(root),
+    gitHead: gitHeadSha(root) ?? undefined,
+  });
 
   return {
     project: { ...project, initialized: true },

@@ -1,8 +1,21 @@
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export interface GitInfo {
   available: boolean;
   isRepo: boolean;
+}
+
+/** Fast filesystem probe: returns true only if `.git` exists in `cwd` or an ancestor directory. */
+export function hasGitDir(cwd: string): boolean {
+  let dir = path.resolve(cwd);
+  for (;;) {
+    if (fs.existsSync(path.join(dir, '.git'))) return true;
+    const parent = path.dirname(dir);
+    if (parent === dir) return false;
+    dir = parent;
+  }
 }
 
 function run(args: string[], cwd: string): { ok: boolean; out: string } {
@@ -19,12 +32,21 @@ function run(args: string[], cwd: string): { ok: boolean; out: string } {
 export function gitInfo(cwd: string): GitInfo {
   const v = spawnSync('git', ['--version'], { encoding: 'utf8', windowsHide: true });
   if (v.error || v.status !== 0) return { available: false, isRepo: false };
+  if (!hasGitDir(cwd)) return { available: true, isRepo: false };
   const r = run(['rev-parse', '--is-inside-work-tree'], cwd);
   return { available: true, isRepo: r.ok && r.out.trim() === 'true' };
 }
 
+/** Returns current HEAD commit SHA if inside a git repository, otherwise null. */
+export function gitHeadSha(root: string): string | null {
+  if (!hasGitDir(root)) return null;
+  const r = run(['rev-parse', '--short', 'HEAD'], root);
+  return r.ok ? r.out.trim() || null : null;
+}
+
 /** Uncommitted changes limited to the .recall path only. */
 export function recallChanges(root: string, recallRel = '.recall'): string[] | null {
+  if (!hasGitDir(root)) return null;
   const r = run(['status', '--porcelain', '--', recallRel], root);
   if (!r.ok) return null;
   return r.out.split('\n').filter(Boolean);
@@ -32,6 +54,7 @@ export function recallChanges(root: string, recallRel = '.recall'): string[] | n
 
 /** Uncommitted changed file paths across the repository (excluding .recall). */
 export function repoChanges(root: string): string[] | null {
+  if (!hasGitDir(root)) return null;
   const r = run(['status', '--porcelain', '-uall'], root);
   if (!r.ok) return null;
   const files: string[] = [];

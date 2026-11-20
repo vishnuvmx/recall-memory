@@ -1,36 +1,59 @@
 #!/usr/bin/env node
 /**
- * Recall Retrieval & Write-Path Evaluation Harness
+ * Recall Offline Retrieval & Symbol Lookup Evaluation Suite (`npm run eval`)
  *
- * 1. Measures `recall context` (hybridSearch) retrieval quality across 28 realistic,
- *    challenging `query -> expected memory ID` pairs over a 30-memory engineering corpus
- *    (plus proposed/superseded distractors that must never be returned).
- *    Tests:
- *      - Vocabulary gaps bridged only by corpus tag/term co-occurrence (e.g. "login failure" -> JWT 401)
- *      - Inflected/morphological variants ("retried", "migrating", "throttled", "authenticating")
- *      - Stopword-heavy conversational queries ("why are container tokens rejected when...")
- *      - Technical identifiers & error codes ("EPERM", "429", "NodeNext")
- *    Reports Recall@1, Recall@3, and MRR (Mean Reciprocal Rank).
- * 2. Times `agentRemember()` / `refreshDerivedStores()` write latency scaling.
+ * Implements B4 (Retrieval Quality Evaluation):
+ * 1. Deterministic 30-memory engineering corpus (+ proposed, archived, and expired distractors)
+ *    and 32 labelled ground-truth queries with graded relevance (3 = primary target, 2 = closely
+ *    related sibling memory, 1 = partially relevant context).
+ * 2. Computes:
+ *    - Precision@1, Precision@3, Precision@5
+ *    - Recall@1, Recall@3, Recall@5 (for primary target)
+ *    - Graded Recall@3, Graded Recall@5 (across all relevant items for the query)
+ *    - MRR (Mean Reciprocal Rank)
+ *    - nDCG@3, nDCG@5 (Normalized Discounted Cumulative Gain)
+ *    - Unnecessary Retrieval Rate (fraction of returned hits with relevance 0)
+ *    - Distractor Leak Rate (must be 0.0% — proposed/archived/expired memories must never leak)
+ *    - Average Context Tokens Produced
+ * 3. Compares 6 retrieval modes (ablation study):
+ *    - KEYWORD_ONLY:      Deterministic keyword/stem search (`search()`)
+ *    - FTS5_BM25_ONLY:    SQLite FTS5 Porter-stemmed BM25 ranking only
+ *    - VECTOR_ONLY:       64-dim MD5 feature-hash cosine similarity only (`getOrGenerateEmbedding`)
+ *    - HYBRID_MINMAX:     Production `hybridSearch` default (Identifier + BM25 + Co-occurrence + 64-dim vector)
+ *    - HYBRID_RRF:        Reciprocal Rank Fusion (`fusionMode: 'rrf'`)
+ *    - HYBRID_RAW:        Unnormalized raw linear sum (`fusionMode: 'raw'`)
+ * 4. Evaluates Code Symbol & File Lookup (`whereIs`) against 14 ground-truth symbol/file targets,
+ *    reporting exact coverage gaps (e.g., unmodified TypeScript class methods, exported constants,
+ *    and multi-word queries) separately from false positives.
  */
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 import {
   initProject,
   agentRemember,
+  archive,
+  search,
+  hybridSearch,
   contextHybrid,
+  formatHybridHitsCompact,
+  getOrGenerateEmbedding,
+  cosineSimilarity,
+  getSharedSqliteStore,
   closeSharedSqliteStore,
   loadSearchableMemories,
+  whereIs,
 } from '../dist/index.js';
 
-const CORPUS = [
+export const EVAL_DATASET_VERSION = 'recall-eval-ds-v1';
+
+export const CORPUS = [
   {
     key: 'auth_jwt_401',
     title: 'JWT 401 bug on container clock skew',
     type: 'bugfix',
-    // Note: does NOT contain the word "login" or "signin" — only "auth", "jwt", "token"
     tags: ['auth', 'jwt', 'token', 'clock'],
     text: 'Bearer tokens rejected with HTTP 401 when container NTP drifted by >30s. Added 60s clockTolerance to jwt.verify during token validation.',
   },
@@ -38,7 +61,6 @@ const CORPUS = [
     key: 'auth_cookie_samesite',
     title: 'Session cookie SameSite=Lax requirement for OAuth callback',
     type: 'decision',
-    // Connects "login" / "signin" <-> "auth" / "jwt" / "session" in this repo's vocabulary
     tags: ['auth', 'oauth', 'cookie', 'login', 'signin', 'session', 'jwt'],
     text: 'Use SameSite=Lax instead of Strict on the session cookie so external OAuth login and signin redirects preserve session state before issuing JWT.',
   },
@@ -224,7 +246,13 @@ const CORPUS = [
     tags: ['sessions', 'checkpoint', 'prune', 'retention', 'storage'],
     text: 'pruneSessions bounds .recall/sessions/session-log.md to a 14-day window and at most 50 entries so session logs never bloat the repo.',
   },
-  // Long prose distractor loaded with common stopwords ("the", "when", "how", "why", "with", "from")
+  {
+    key: 'agy_hook_inject_steps',
+    title: 'Antigravity SessionStart hook returns injectSteps systemMessage payload',
+    type: 'decision',
+    tags: ['hooks', 'antigravity', 'session', 'automation', 'injection'],
+    text: 'When hookEventName is SessionStart in Antigravity, output injectSteps containing systemMessage.systemMessage with sanitized project context.',
+  },
   {
     key: 'distractor_verbose_notes',
     title: 'General onboarding notes for how the team works with issues',
@@ -234,138 +262,789 @@ const CORPUS = [
   },
 ];
 
-// 28 harder, realistic queries:
-const EVAL_QUERIES = [
-  // 1. Co-occurrence / tag-bridged queries (query uses sibling terms from the repo's vocabulary)
-  { query: 'login failure', expectedKey: 'auth_jwt_401', category: 'co-occurrence+stem' },
-  { query: 'signin fails when server clock is off', expectedKey: 'auth_jwt_401', category: 'co-occurrence' },
-  { query: 'oauth login loses state on redirect', expectedKey: 'auth_cookie_samesite', category: 'co-occurrence' },
-  { query: 'customer billed twice when webhook retried', expectedKey: 'api_idempotency', category: 'co-occurrence+stem' },
-  { query: 'throttling incoming client traffic', expectedKey: 'api_rate_limit', category: 'co-occurrence+stem' },
-  { query: 'migrating tables across replicas', expectedKey: 'db_migration_lock', category: 'co-occurrence+stem' },
-  { query: 'theming variables for dark mode', expectedKey: 'ui_design_tokens', category: 'co-occurrence+stem' },
-  { query: 'container traffic routed before warmup completes', expectedKey: 'deploy_zero_downtime', category: 'co-occurrence' },
+/**
+ * 32 Ground-Truth Queries with Graded Relevance:
+ * - expectedKey: primary target (relevance = 3)
+ * - graded: map of { [key]: relevance (1..3) }
+ */
+export const EVAL_QUERIES = [
+  // 1. Co-occurrence / tag-bridged queries
+  {
+    query: 'login failure',
+    expectedKey: 'auth_jwt_401',
+    graded: { auth_jwt_401: 3, auth_cookie_samesite: 2 },
+    category: 'co-occurrence+stem',
+  },
+  {
+    query: 'signin fails when server clock is off',
+    expectedKey: 'auth_jwt_401',
+    graded: { auth_jwt_401: 3, auth_cookie_samesite: 1 },
+    category: 'co-occurrence',
+  },
+  {
+    query: 'oauth login loses state on redirect',
+    expectedKey: 'auth_cookie_samesite',
+    graded: { auth_cookie_samesite: 3, auth_jwt_401: 1 },
+    category: 'co-occurrence',
+  },
+  {
+    query: 'customer billed twice when webhook retried',
+    expectedKey: 'api_idempotency',
+    graded: { api_idempotency: 3, queue_exponential_backoff: 1 },
+    category: 'co-occurrence+stem',
+  },
+  {
+    query: 'throttling incoming client traffic',
+    expectedKey: 'api_rate_limit',
+    graded: { api_rate_limit: 3, deploy_zero_downtime: 1 },
+    category: 'co-occurrence+stem',
+  },
+  {
+    query: 'migrating tables across replicas',
+    expectedKey: 'db_migration_lock',
+    graded: { db_migration_lock: 3, db_n_plus_one: 1 },
+    category: 'co-occurrence+stem',
+  },
+  {
+    query: 'theming variables for dark mode',
+    expectedKey: 'ui_design_tokens',
+    graded: { ui_design_tokens: 3 },
+    category: 'co-occurrence+stem',
+  },
+  {
+    query: 'container traffic routed before warmup completes',
+    expectedKey: 'deploy_zero_downtime',
+    graded: { deploy_zero_downtime: 3, auth_jwt_401: 1 },
+    category: 'co-occurrence',
+  },
 
-  // 2. Inflected / morphological forms (stemming required: retried->retry, migrating->migration, throttled->throttle, pruning->prune, locked->lock)
-  { query: 'migrating database columns', expectedKey: 'db_migration_lock', category: 'morphology' },
-  { query: 'retried charge requests', expectedKey: 'api_idempotency', category: 'morphology' },
-  { query: 'throttled API clients', expectedKey: 'api_rate_limit', category: 'morphology' },
-  { query: 'pruning stale history', expectedKey: 'session_retention_prune', category: 'morphology' },
-  { query: 'customizing component themes', expectedKey: 'ui_design_tokens', category: 'morphology' },
-  { query: 'database locked under parallel writes', expectedKey: 'db_sqlite_wal', category: 'morphology' },
+  // 2. Inflected / morphological variants
+  {
+    query: 'migrating database columns',
+    expectedKey: 'db_migration_lock',
+    graded: { db_migration_lock: 3, db_sqlite_wal: 1 },
+    category: 'morphology',
+  },
+  {
+    query: 'retried charge requests',
+    expectedKey: 'api_idempotency',
+    graded: { api_idempotency: 3 },
+    category: 'morphology',
+  },
+  {
+    query: 'throttled API clients',
+    expectedKey: 'api_rate_limit',
+    graded: { api_rate_limit: 3 },
+    category: 'morphology',
+  },
+  {
+    query: 'pruning stale history',
+    expectedKey: 'session_retention_prune',
+    graded: { session_retention_prune: 3 },
+    category: 'morphology',
+  },
+  {
+    query: 'customizing component themes',
+    expectedKey: 'ui_design_tokens',
+    graded: { ui_design_tokens: 3 },
+    category: 'morphology',
+  },
+  {
+    query: 'database locked under parallel writes',
+    expectedKey: 'db_sqlite_wal',
+    graded: { db_sqlite_wal: 3, queue_exponential_backoff: 2, win_atomic_rename: 1 },
+    category: 'morphology',
+  },
 
-  // 3. Stopword & short-prefix traps ("is" matching isolation, "time" matching timeout, "in" matching index)
-  { query: 'why is token billing so expensive when system prompt changes', expectedKey: 'cache_prompt_invalidation', category: 'stopwords' },
-  { query: 'how do we fix slow permission lookups on dashboard', expectedKey: 'db_n_plus_one', category: 'stopwords' },
-  { query: 'how to stop untrusted input from hijacking agent instructions', expectedKey: 'sec_prompt_poisoning', category: 'stopwords' },
-  { query: 'false positive entropy alert on TypeScript file path', expectedKey: 'sec_secret_entropy', category: 'stopwords' },
+  // 3. Conversational stopword-heavy queries
+  {
+    query: 'why is token billing so expensive when system prompt changes',
+    expectedKey: 'cache_prompt_invalidation',
+    graded: { cache_prompt_invalidation: 3 },
+    category: 'stopwords',
+  },
+  {
+    query: 'how do we fix slow permission lookups on dashboard',
+    expectedKey: 'db_n_plus_one',
+    graded: { db_n_plus_one: 3 },
+    category: 'stopwords',
+  },
+  {
+    query: 'how to stop untrusted input from hijacking agent instructions',
+    expectedKey: 'sec_prompt_poisoning',
+    graded: { sec_prompt_poisoning: 3, cache_prompt_invalidation: 1 },
+    category: 'stopwords',
+  },
+  {
+    query: 'false positive entropy alert on TypeScript file path',
+    expectedKey: 'sec_secret_entropy',
+    graded: { sec_secret_entropy: 3, build_esm_extensions: 1 },
+    category: 'stopwords',
+  },
 
-  // 4. Technical identifiers & exact module queries
-  { query: 'SQLITE_BUSY error under load', expectedKey: 'db_sqlite_wal', category: 'identifier' },
-  { query: 'symlink escape traversal in resolveInside', expectedKey: 'sec_path_traversal', category: 'identifier' },
-  { query: 'CORS preflight fails when credentials include is set', expectedKey: 'api_cors_credentials', category: 'identifier' },
-  { query: 'NodeNext relative imports failing in ESM build', expectedKey: 'build_esm_extensions', category: 'identifier' },
-  { query: 'circular dependency between service.ts and chat-sync.ts', expectedKey: 'build_circular_dep', category: 'identifier' },
-  { query: 'EPERM error renaming files on Windows', expectedKey: 'win_atomic_rename', category: 'identifier' },
-  { query: 'normalize Windows backslashes for git and index links', expectedKey: 'win_posix_paths', category: 'natural' },
-  { query: 'hook process hangs waiting on stdin when no pipe', expectedKey: 'cli_stdin_tty', category: 'natural' },
-  { query: 'why we do not bundle tree-sitter WASM for symbols', expectedKey: 'failed_ast_wasm', category: 'decision' },
-  { query: 'exponential backoff jitter when database is locked', expectedKey: 'queue_exponential_backoff', category: 'natural' },
+  // 4. Technical identifiers & error codes
+  {
+    query: 'SQLITE_BUSY error under load',
+    expectedKey: 'db_sqlite_wal',
+    graded: { db_sqlite_wal: 3, queue_exponential_backoff: 2 },
+    category: 'identifier',
+  },
+  {
+    query: 'symlink escape traversal in resolveInside',
+    expectedKey: 'sec_path_traversal',
+    graded: { sec_path_traversal: 3 },
+    category: 'identifier',
+  },
+  {
+    query: 'CORS preflight fails when credentials include is set',
+    expectedKey: 'api_cors_credentials',
+    graded: { api_cors_credentials: 3 },
+    category: 'identifier',
+  },
+  {
+    query: 'NodeNext relative imports failing in ESM build',
+    expectedKey: 'build_esm_extensions',
+    graded: { build_esm_extensions: 3, build_circular_dep: 1 },
+    category: 'identifier',
+  },
+  {
+    query: 'circular dependency between service.ts and chat-sync.ts',
+    expectedKey: 'build_circular_dep',
+    graded: { build_circular_dep: 3 },
+    category: 'identifier',
+  },
+  {
+    query: 'EPERM error renaming files on Windows',
+    expectedKey: 'win_atomic_rename',
+    graded: { win_atomic_rename: 3, win_posix_paths: 1 },
+    category: 'identifier',
+  },
+
+  // 5. Natural engineering queries & architecture decisions
+  {
+    query: 'normalize Windows backslashes for git and index links',
+    expectedKey: 'win_posix_paths',
+    graded: { win_posix_paths: 3, win_atomic_rename: 1 },
+    category: 'natural',
+  },
+  {
+    query: 'hook process hangs waiting on stdin when no pipe',
+    expectedKey: 'cli_stdin_tty',
+    graded: { cli_stdin_tty: 3, hook_claude_settings: 1 },
+    category: 'natural',
+  },
+  {
+    query: 'why we do not bundle tree-sitter WASM for symbols',
+    expectedKey: 'failed_ast_wasm',
+    graded: { failed_ast_wasm: 3, landmarks_mtime_cache: 2 },
+    category: 'decision',
+  },
+  {
+    query: 'exponential backoff jitter when database is locked',
+    expectedKey: 'queue_exponential_backoff',
+    graded: { queue_exponential_backoff: 3, db_sqlite_wal: 2 },
+    category: 'natural',
+  },
+  {
+    query: 'skip regenerating PASSPORT.md when fingerprint matches',
+    expectedKey: 'passport_fingerprint',
+    graded: { passport_fingerprint: 3, landmarks_mtime_cache: 1 },
+    category: 'decision',
+  },
+  {
+    query: 'cache extracted symbols by file mtimeMs and size',
+    expectedKey: 'landmarks_mtime_cache',
+    graded: { landmarks_mtime_cache: 3, passport_fingerprint: 1 },
+    category: 'decision',
+  },
+  {
+    query: 'never auto-commit .recall files in git',
+    expectedKey: 'failed_git_autocommit',
+    graded: { failed_git_autocommit: 3 },
+    category: 'decision',
+  },
+  {
+    query: 'Antigravity SessionStart injectSteps systemMessage format',
+    expectedKey: 'agy_hook_inject_steps',
+    graded: { agy_hook_inject_steps: 3, hook_claude_settings: 2 },
+    category: 'natural',
+  },
 ];
 
-const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'recall-eval-'));
+/**
+ * Ground-Truth Symbol & File Lookup Queries (`whereIs`) against a deterministic fixture
+ * to measure symbol indexing coverage (functions, classes, methods, constants, multi-word queries).
+ */
+export const SYMBOL_EVAL_TARGETS = [
+  { query: 'AuthTokenService', expectedFile: 'src/auth/token-service.ts', expectedName: 'AuthTokenService', category: 'exported-class' },
+  { query: 'verifyBearerToken', expectedFile: 'src/auth/token-service.ts', expectedName: 'verifyBearerToken', category: 'exported-function' },
+  { query: 'issueRefreshToken', expectedFile: 'src/auth/token-service.ts', expectedName: 'issueRefreshToken', category: 'async-class-method' },
+  { query: 'revokeSessionSync', expectedFile: 'src/auth/token-service.ts', expectedName: 'revokeSessionSync', category: 'unmodified-class-method' },
+  { query: 'validateClaimsInternal', expectedFile: 'src/auth/token-service.ts', expectedName: 'validateClaimsInternal', category: 'private-class-method' },
+  { query: 'TokenValidationOptions', expectedFile: 'src/auth/token-service.ts', expectedName: 'TokenValidationOptions', category: 'exported-interface' },
+  { query: 'TokenGrantKind', expectedFile: 'src/auth/token-service.ts', expectedName: 'TokenGrantKind', category: 'exported-type' },
+  { query: 'DEFAULT_CLOCK_TOLERANCE_SEC', expectedFile: 'src/auth/token-service.ts', expectedName: 'DEFAULT_CLOCK_TOLERANCE_SEC', category: 'exported-const' },
+  { query: 'LedgerRepository', expectedFile: 'src/db/ledger-repo.ts', expectedName: 'LedgerRepository', category: 'exported-class' },
+  { query: 'commitTransactionSync', expectedFile: 'src/db/ledger-repo.ts', expectedName: 'commitTransactionSync', category: 'unmodified-class-method' },
+  { query: 'appendImmutableEntry', expectedFile: 'src/db/ledger-repo.ts', expectedName: 'appendImmutableEntry', category: 'exported-arrow-fn' },
+  { query: 'ledger-repo.ts', expectedFile: 'src/db/ledger-repo.ts', expectedName: 'src/db/ledger-repo.ts', category: 'file-path' },
+  { query: 'token service', expectedFile: 'src/auth/token-service.ts', expectedName: 'AuthTokenService', category: 'multi-word-query' },
+  { query: 'verify bearer', expectedFile: 'src/auth/token-service.ts', expectedName: 'verifyBearerToken', category: 'multi-word-query' },
+];
 
-try {
-  initProject(tmpRoot);
-  const keyToId = new Map();
+function computeDcg(relevances, k) {
+  let dcg = 0;
+  for (let i = 0; i < Math.min(k, relevances.length); i++) {
+    const rel = relevances[i] ?? 0;
+    if (rel > 0) {
+      dcg += (Math.pow(2, rel) - 1) / Math.log2(i + 2);
+    }
+  }
+  return dcg;
+}
 
-  for (const item of CORPUS) {
-    const res = agentRemember(tmpRoot, {
-      title: item.title,
-      type: item.type,
-      tags: item.tags,
-      text: item.text,
-    });
-    keyToId.set(item.key, res.memory.id);
+function computeNdcg(retrievedKeys, gradedMap, k) {
+  const actualRels = retrievedKeys.slice(0, k).map((key) => gradedMap[key] ?? 0);
+  const idealRels = Object.values(gradedMap).sort((a, b) => b - a);
+  const idcg = computeDcg(idealRels, k);
+  if (idcg === 0) return 0;
+  return computeDcg(actualRels, k) / idcg;
+}
+
+function runModeRetrieval(mode, memories, store, query, limit = 5) {
+  const activeOnly = memories.filter(
+    (m) => m.status === 'active' && !m.deprecated && (!m.expiresAt || m.expiresAt >= new Date().toISOString().slice(0, 10)),
+  );
+
+  if (mode === 'KEYWORD_ONLY') {
+    const hits = search(memories, query, { limit });
+    const text = hits.map((h) => `- ${h.memory.title}: ${h.excerpt}`).join('\n');
+    return {
+      hits: hits.map((h) => ({ memory: h.memory, score: h.score, excerpt: h.excerpt })),
+      tokens: Math.ceil(text.length / 4),
+    };
   }
 
-  // Add distractors: a proposed memory that MUST NOT rank in normal context
-  agentRemember(tmpRoot, {
-    title: 'JWT 401 bug on container clock skew UNVERIFIED PROPOSAL',
+  if (mode === 'FTS5_BM25_ONLY') {
+    const ftsHits = store.ftsBm25Search(query, limit * 2);
+    const byId = new Map(activeOnly.map((m) => [m.id, m]));
+    const hits = [];
+    for (const fh of ftsHits) {
+      const m = byId.get(fh.id);
+      if (m) {
+        hits.push({ memory: m, score: fh.bm25Score, excerpt: m.body.slice(0, 160) });
+        if (hits.length >= limit) break;
+      }
+    }
+    const text = hits.map((h) => `- ${h.memory.title}: ${h.excerpt}`).join('\n');
+    return { hits, tokens: Math.ceil(text.length / 4) };
+  }
+
+  if (mode === 'VECTOR_ONLY') {
+    const qVec = getOrGenerateEmbedding(query).vector;
+    const scored = activeOnly
+      .map((m) => {
+        const mVec = store.getEmbedding(m.id) ?? getOrGenerateEmbedding(`${m.title}\n${m.body}`).vector;
+        const sim = cosineSimilarity(qVec, mVec);
+        return { memory: m, score: sim, excerpt: m.body.slice(0, 160) };
+      })
+      .filter((x) => x.score > 0.1)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit);
+    const text = scored.map((h) => `- ${h.memory.title}: ${h.excerpt}`).join('\n');
+    return { hits: scored, tokens: Math.ceil(text.length / 4) };
+  }
+
+  if (mode === 'HYBRID_WITH_MD5_VECTOR') {
+    const hits = hybridSearch(memories, query, { limit, sqliteStore: store, fusionMode: 'minmax', disableVector: false });
+    const formatted = formatHybridHitsCompact(hits);
+    return { hits, tokens: Math.ceil(formatted.length / 4) };
+  }
+
+  const fusionMap = {
+    HYBRID_MINMAX: 'minmax',
+    HYBRID_RRF: 'rrf',
+    HYBRID_RAW: 'raw',
+  };
+  const fusionMode = fusionMap[mode] ?? 'minmax';
+  const hits = hybridSearch(memories, query, { limit, sqliteStore: store, fusionMode });
+  const formatted = formatHybridHitsCompact(hits);
+  return { hits, tokens: Math.ceil(formatted.length / 4) };
+}
+
+/**
+ * Second Independent Representative Corpus (Dataset B: Frontend, Mobile, UI, Data Pipeline, Typos & Synonyms)
+ * Validates whether 64-dim MD5 vectors help or hurt across a completely different engineering domain.
+ */
+const DATASET_B_CORPUS = [
+  {
+    key: 'ui_modal_focus',
+    title: 'Trap keyboard focus inside accessible dialog modal',
+    type: 'convention',
+    tags: ['ui', 'accessibility', 'a11y', 'modal', 'dialog', 'keyboard'],
+    text: 'Use native HTML <dialog> with showModal() so Escape closes the popup and Tab focus stays trapped inside.',
+  },
+  {
+    key: 'ui_scroll_jank',
+    title: 'Virtualize table rows above 200 items to eliminate scroll jank',
     type: 'bugfix',
-    status: 'proposed',
-    tags: ['auth', 'login', 'jwt', 'token'],
-    text: 'Proposed unverified login failure 401 auth change that should never be injected or ranked by default.',
-  });
+    tags: ['ui', 'performance', 'table', 'scrolling', 'fps', 'list'],
+    text: 'Rendering 1500 DOM rows dropped frame rate below 20fps. Switched DataGrid to windowed row virtualization.',
+  },
+  {
+    key: 'ui_dark_palette',
+    title: 'Never use pure black #000000 backgrounds in dark theme surfaces',
+    type: 'design_system',
+    tags: ['ui', 'theme', 'dark-mode', 'colors', 'design'],
+    text: 'Dark mode cards must use --surface-elevated (#121417) instead of #000000 to prevent OLED smearing.',
+  },
+  {
+    key: 'ui_no_material',
+    title: 'Do not import Material UI components in custom design system',
+    type: 'design_system',
+    tags: ['ui', 'design', 'components', 'material', 'styling'],
+    text: 'All buttons, inputs, and sheets must use internal Radix primitives styled with project design tokens, never @mui/material.',
+  },
+  {
+    key: 'react_stale_closure',
+    title: 'WebSocket message handler stale closure bug in useEffect',
+    type: 'bugfix',
+    tags: ['react', 'hooks', 'websocket', 'state', 'closure'],
+    text: 'Event listener registered once in useEffect captured stale cart state. Use a ref or functional state updater setCart(prev => ...).',
+  },
+  {
+    key: 'react_hydration_tz',
+    title: 'SSR hydration mismatch caused by locale date formatting',
+    type: 'bugfix',
+    tags: ['react', 'ssr', 'nextjs', 'hydration', 'timezone', 'dates'],
+    text: 'toLocaleDateString() rendered UTC on server and local timezone on browser. Format timestamps with explicit timeZone: "UTC" or inside client mount.',
+  },
+  {
+    key: 'mobile_ios_keyboard',
+    title: 'iOS Safari viewport height jump when virtual keyboard opens',
+    type: 'bugfix',
+    tags: ['mobile', 'ios', 'safari', 'viewport', 'keyboard', 'css'],
+    text: 'Replace 100vh with 100dvh on fixed bottom drawers so the iOS soft keyboard does not push the sticky submit button off-screen.',
+  },
+  {
+    key: 'mobile_flutter_dispose',
+    title: 'Dispose TextEditingController and StreamSubscription in widget dispose()',
+    type: 'convention',
+    tags: ['mobile', 'flutter', 'dart', 'memory-leak', 'lifecycle'],
+    text: 'Every StatefulWidget allocating controllers or stream listeners must cancel and dispose them to prevent memory leaks on route pop.',
+  },
+  {
+    key: 'data_parquet_partition',
+    title: 'Partition analytics Parquet exports by event_date UTC',
+    type: 'decision',
+    tags: ['data', 'analytics', 'parquet', 'etl', 'warehouse', 'storage'],
+    text: 'Write daily Parquet batches under s3://analytics/dt=YYYY-MM-DD/ so DuckDB and BigQuery prune scans without reading full history.',
+  },
+  {
+    key: 'data_csv_bom',
+    title: 'Prefix exported UTF-8 CSV downloads with BOM for Excel compatibility',
+    type: 'bugfix',
+    tags: ['data', 'csv', 'export', 'excel', 'encoding', 'utf8'],
+    text: 'Microsoft Excel garbled accented customer names unless the UTF-8 byte order mark \\uFEFF was prepended to CSV responses.',
+  },
+  {
+    key: 'queue_dlq_replay',
+    title: 'Route poison messages to dead-letter queue after 5 consumer failures',
+    type: 'decision',
+    tags: ['queue', 'messaging', 'dlq', 'retries', 'worker', 'kafka'],
+    text: 'Cap consumer retries at 5 attempts with exponential backoff, then move unprocessable payloads to dead-letter topic with stacktrace headers.',
+  },
+  {
+    key: 'search_prefix_trigram',
+    title: 'Use pg_trgm GIN index for fuzzy customer name autocomplete',
+    type: 'decision',
+    tags: ['search', 'postgres', 'autocomplete', 'fuzzy', 'index'],
+    text: 'Standard B-tree indexes cannot accelerate leading-wildcard ILIKE queries; created GIN trigram index on customers.full_name.',
+  },
+  {
+    key: 'ci_lockfile_frozen',
+    title: 'CI pipelines must run npm ci instead of npm install',
+    type: 'convention',
+    tags: ['ci', 'github-actions', 'npm', 'lockfile', 'builds'],
+    text: 'Always use npm ci in GitHub Actions so package-lock.json drift fails the build deterministically.',
+  },
+  {
+    key: 'auth_pkce_spa',
+    title: 'Browser SPAs must use OAuth Authorization Code flow with PKCE',
+    type: 'decision',
+    tags: ['auth', 'oauth', 'pkce', 'spa', 'security', 'browser'],
+    text: 'Implicit grant flow exposes access tokens in URL fragments. Require S256 PKCE code_challenge for all browser clients.',
+  },
+  {
+    key: 'testing_msw_network',
+    title: 'Mock external HTTP endpoints with MSW instead of monkey-patching fetch',
+    type: 'convention',
+    tags: ['testing', 'http', 'mocking', 'msw', 'frontend'],
+    text: 'Intercept outbound API calls using Mock Service Worker handlers so tests exercise real serialization and headers.',
+  },
+  {
+    key: 'perf_image_lcp',
+    title: 'Preload hero banner image with fetchpriority=high to fix LCP',
+    type: 'lesson',
+    tags: ['performance', 'cwv', 'lcp', 'images', 'frontend'],
+    text: 'Lazy-loading above-the-fold hero images regressed Largest Contentful Paint by 900ms. Mark hero <img> eager with fetchpriority="high".',
+  },
+];
 
-  for (const mode of ['minmax', 'rrf', 'raw']) {
-    let hitsAt1 = 0;
-    let hitsAt3 = 0;
-    let reciprocalRankSum = 0;
-    const misses = [];
-    const nonTop1 = [];
+const DATASET_B_QUERIES = [
+  { query: 'popup dialog escape key focus trap', expectedKey: 'ui_modal_focus', graded: { ui_modal_focus: 3 }, category: 'ui' },
+  { query: 'slow scrolling lag in large data table', expectedKey: 'ui_scroll_jank', graded: { ui_scroll_jank: 3 }, category: 'perf' },
+  { query: 'pure black background dark theme oled', expectedKey: 'ui_dark_palette', graded: { ui_dark_palette: 3 }, category: 'design' },
+  { query: 'prohibited material ui library styling', expectedKey: 'ui_no_material', graded: { ui_no_material: 3 }, category: 'design' },
+  { query: 'useEffect listener reads outdated react state', expectedKey: 'react_stale_closure', graded: { react_stale_closure: 3 }, category: 'bugfix' },
+  { query: 'nextjs hydration error from date timezone', expectedKey: 'react_hydration_tz', graded: { react_hydration_tz: 3 }, category: 'bugfix' },
+  { query: 'sticky drawer jumps when iphone keyboard opens', expectedKey: 'mobile_ios_keyboard', graded: { mobile_ios_keyboard: 3 }, category: 'mobile' },
+  { query: 'flutter stream controller memory leak on navigation', expectedKey: 'mobile_flutter_dispose', graded: { mobile_flutter_dispose: 3 }, category: 'mobile' },
+  { query: 'daily parquet folder partitioning for bigquery', expectedKey: 'data_parquet_partition', graded: { data_parquet_partition: 3 }, category: 'data' },
+  { query: 'excel garbled accented characters in csv download', expectedKey: 'data_csv_bom', graded: { data_csv_bom: 3 }, category: 'data' },
+  { query: 'worker poison message dead letter topic retries', expectedKey: 'queue_dlq_replay', graded: { queue_dlq_replay: 3 }, category: 'queue' },
+  { query: 'postgres fuzzy autocomplete ILIKE index', expectedKey: 'search_prefix_trigram', graded: { search_prefix_trigram: 3 }, category: 'search' },
+  { query: 'lockfile drift in github actions build', expectedKey: 'ci_lockfile_frozen', graded: { ci_lockfile_frozen: 3 }, category: 'ci' },
+  { query: 'browser spa oauth implicit grant pkce', expectedKey: 'auth_pkce_spa', graded: { auth_pkce_spa: 3 }, category: 'security' },
+  { query: 'how to stub api requests in frontend tests', expectedKey: 'testing_msw_network', graded: { testing_msw_network: 3 }, category: 'testing' },
+  { query: 'largest contentful paint regressed by lazy hero image', expectedKey: 'perf_image_lcp', graded: { perf_image_lcp: 3 }, category: 'perf' },
+  // Near-miss typo queries to specifically test whether 64-dim MD5 character 3-grams actually rescue typos!
+  { query: 'virtulize data grid scroling', expectedKey: 'ui_scroll_jank', graded: { ui_scroll_jank: 3 }, category: 'typo' },
+  { query: 'hydraton mismatch local datestring', expectedKey: 'react_hydration_tz', graded: { react_hydration_tz: 3 }, category: 'typo' },
+];
 
-    const searchT0 = performance.now();
-    for (const q of EVAL_QUERIES) {
-      const expectedId = keyToId.get(q.expectedKey);
-      const results = contextHybrid(tmpRoot, q.query, { limit: 5, fusionMode: mode });
-      const rankIndex = results.findIndex((r) => r.memory.id === expectedId);
+function evaluateModesOnCorpus(corpus, queries, extraDistractors = true) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'recall-eval-ds-'));
+  try {
+    initProject(dir);
+    const recallDir = path.join(dir, '.recall');
+    const keyToId = new Map();
+    const idToKey = new Map();
 
-      if (rankIndex === 0) hitsAt1++;
-      if (rankIndex >= 0 && rankIndex < 3) hitsAt3++;
-      if (rankIndex > 0) {
-        nonTop1.push(`  Non-top-1: [${q.category}] "${q.query}" -> rank #${rankIndex + 1} (top1: "${results[0]?.memory.title}")`);
-      }
-      if (rankIndex >= 0) {
-        reciprocalRankSum += 1 / (rankIndex + 1);
-      } else {
-        misses.push({
-          query: q.query,
-          category: q.category,
-          expectedKey: q.expectedKey,
-          rank: 'MISS',
-          got: results.slice(0, 3).map((r) => r.memory.title),
-        });
-      }
-      if (rankIndex >= 3) {
-        misses.push({
-          query: q.query,
-          category: q.category,
-          expectedKey: q.expectedKey,
-          rank: rankIndex + 1,
-          got: results.slice(0, 3).map((r) => r.memory.title),
-        });
-      }
+    for (const item of corpus) {
+      const res = agentRemember(dir, {
+        title: item.title,
+        type: item.type,
+        tags: item.tags,
+        text: item.text,
+      });
+      keyToId.set(item.key, res.memory.id);
+      idToKey.set(res.memory.id, item.key);
     }
-    const searchElapsed = performance.now() - searchT0;
 
-    const total = EVAL_QUERIES.length;
-    const recallAt1 = (hitsAt1 / total) * 100;
-    const recallAt3 = (hitsAt3 / total) * 100;
-    const mrr = reciprocalRankSum / total;
+    const distractorIds = new Set();
+    if (extraDistractors) {
+      const proposedDistractor = agentRemember(dir, {
+        title: 'JWT 401 bug on container clock skew UNVERIFIED PROPOSAL',
+        type: 'bugfix',
+        status: 'proposed',
+        tags: ['auth', 'login', 'jwt', 'token'],
+        text: 'Proposed unverified login failure 401 auth change that should never be injected or ranked by default.',
+      });
+      const archivedDistractor = agentRemember(dir, {
+        title: 'SQLite WAL pragma and busy_timeout ARCHIVED LEGACY',
+        type: 'decision',
+        tags: ['database', 'sqlite', 'locking'],
+        text: 'Archived SQLITE_BUSY note that was retired.',
+      });
+      archive(dir, archivedDistractor.memory.id);
+      const expiredDistractor = agentRemember(dir, {
+        title: 'Temporary rate limit freeze for holiday migration',
+        type: 'decision',
+        tags: ['api', 'ratelimit', 'throttle', '429'],
+        expiresAt: '2020-01-01',
+        text: 'Expired rate limiter override that must be filtered out.',
+      });
+      distractorIds.add(proposedDistractor.memory.id);
+      distractorIds.add(archivedDistractor.memory.id);
+      distractorIds.add(expiredDistractor.memory.id);
+    }
 
-    console.log('====================================================');
-    console.log(`  EVAL MODE: ${mode.toUpperCase()}`);
-    console.log('====================================================');
-    console.log(`Corpus size:       ${CORPUS.length} active memories (+1 proposed distractor)`);
-    console.log(`Eval queries:      ${total}`);
-    console.log(`Recall@1:          ${hitsAt1}/${total} (${recallAt1.toFixed(1)}%)`);
-    console.log(`Recall@3:          ${hitsAt3}/${total} (${recallAt3.toFixed(1)}%)`);
-    console.log(`MRR:               ${mrr.toFixed(3)}`);
-    console.log(`Search latency:    ${searchElapsed.toFixed(2)} ms total (${(searchElapsed / total).toFixed(2)} ms/query)`);
+    const allMemories = loadSearchableMemories(recallDir);
+    const store = getSharedSqliteStore(recallDir);
+    store.ensureSynced(allMemories);
 
-    if (misses.length > 0) {
-      console.log('\nQueries missed in top-3:');
-      for (const m of misses) {
-        console.log(`  - [${m.category}] "${m.query}" -> expected [${m.expectedKey}] (rank: ${m.rank})`);
-        console.log(`    top hits: ${m.got.join(' | ')}`);
+    const modes = [
+      'KEYWORD_ONLY',
+      'FTS5_BM25_ONLY',
+      'VECTOR_ONLY',
+      'HYBRID_MINMAX',
+      'HYBRID_WITH_MD5_VECTOR',
+      'HYBRID_RRF',
+      'HYBRID_RAW',
+    ];
+
+    const modeReports = {};
+    for (const mode of modes) {
+      // Warmup 1 query so first-mode JIT compilation doesn't skew ms/Q comparison
+      if (queries.length > 0) {
+        runModeRetrieval(mode, allMemories, store, queries[0].query, 5);
       }
+      let hitsAt1 = 0;
+      let hitsAt3 = 0;
+      let hitsAt5 = 0;
+      let precisionAt1Sum = 0;
+      let precisionAt3Sum = 0;
+      let precisionAt5Sum = 0;
+      let gradedRecallAt3Sum = 0;
+      let gradedRecallAt5Sum = 0;
+      let mrrSum = 0;
+      let ndcgAt3Sum = 0;
+      let ndcgAt5Sum = 0;
+      let unnecessaryAt3Sum = 0;
+      let distractorLeaks = 0;
+      let totalTokens = 0;
+      const nonTop1 = [];
+      const missesAt3 = [];
+
+      const t0 = performance.now();
+      for (const q of queries) {
+        const expectedId = keyToId.get(q.expectedKey);
+        const { hits, tokens } = runModeRetrieval(mode, allMemories, store, q.query, 5);
+        totalTokens += tokens;
+
+        if (hits.some((h) => distractorIds.has(h.memory.id))) distractorLeaks++;
+
+        const retrievedKeys = hits.map((h) => idToKey.get(h.memory.id) ?? h.memory.id);
+        const primaryRankIdx = hits.findIndex((h) => h.memory.id === expectedId);
+
+        if (primaryRankIdx === 0) hitsAt1++;
+        if (primaryRankIdx >= 0 && primaryRankIdx < 3) hitsAt3++;
+        if (primaryRankIdx >= 0 && primaryRankIdx < 5) hitsAt5++;
+        if (primaryRankIdx >= 0) mrrSum += 1 / (primaryRankIdx + 1);
+
+        const relCount = (k) => retrievedKeys.slice(0, k).filter((key) => (q.graded[key] ?? 0) > 0).length;
+        const totalRelevantForQuery = Object.keys(q.graded).length;
+
+        const k1Denom = Math.min(1, Math.max(1, hits.length));
+        const k3Denom = Math.min(3, Math.max(1, hits.length));
+        const k5Denom = Math.min(5, Math.max(1, hits.length));
+
+        precisionAt1Sum += hits.length > 0 ? relCount(1) / k1Denom : 0;
+        precisionAt3Sum += hits.length > 0 ? relCount(3) / k3Denom : 0;
+        precisionAt5Sum += hits.length > 0 ? relCount(5) / k5Denom : 0;
+
+        gradedRecallAt3Sum += relCount(3) / totalRelevantForQuery;
+        gradedRecallAt5Sum += relCount(5) / totalRelevantForQuery;
+
+        ndcgAt3Sum += computeNdcg(retrievedKeys, q.graded, 3);
+        ndcgAt5Sum += computeNdcg(retrievedKeys, q.graded, 5);
+
+        const top3Hits = retrievedKeys.slice(0, 3);
+        const irrelevantInTop3 = top3Hits.filter((key) => (q.graded[key] ?? 0) === 0).length;
+        unnecessaryAt3Sum += top3Hits.length > 0 ? irrelevantInTop3 / top3Hits.length : 0;
+
+        if (primaryRankIdx > 0) {
+          nonTop1.push({ query: q.query, category: q.category, rank: primaryRankIdx + 1, top1Title: hits[0]?.memory.title ?? 'none' });
+        }
+        if (primaryRankIdx === -1 || primaryRankIdx >= 3) {
+          missesAt3.push({ query: q.query, category: q.category, expectedKey: q.expectedKey, rank: primaryRankIdx === -1 ? 'MISS' : primaryRankIdx + 1, got: hits.slice(0, 3).map((r) => r.memory.title) });
+        }
+      }
+      const elapsedMs = performance.now() - t0;
+      const Q = queries.length;
+
+      modeReports[mode] = {
+        queries: Q,
+        recallAt1Pct: Number(((hitsAt1 / Q) * 100).toFixed(1)),
+        recallAt3Pct: Number(((hitsAt3 / Q) * 100).toFixed(1)),
+        recallAt5Pct: Number(((hitsAt5 / Q) * 100).toFixed(1)),
+        gradedRecallAt3Pct: Number(((gradedRecallAt3Sum / Q) * 100).toFixed(1)),
+        gradedRecallAt5Pct: Number(((gradedRecallAt5Sum / Q) * 100).toFixed(1)),
+        precisionAt1Pct: Number(((precisionAt1Sum / Q) * 100).toFixed(1)),
+        precisionAt3Pct: Number(((precisionAt3Sum / Q) * 100).toFixed(1)),
+        precisionAt5Pct: Number(((precisionAt5Sum / Q) * 100).toFixed(1)),
+        mrr: Number((mrrSum / Q).toFixed(3)),
+        ndcgAt3: Number((ndcgAt3Sum / Q).toFixed(3)),
+        ndcgAt5: Number((ndcgAt5Sum / Q).toFixed(3)),
+        unnecessaryRateAt3Pct: Number(((unnecessaryAt3Sum / Q) * 100).toFixed(1)),
+        distractorLeakRatePct: Number(((distractorLeaks / Q) * 100).toFixed(1)),
+        avgContextTokens: Math.round(totalTokens / Q),
+        totalMs: Number(elapsedMs.toFixed(2)),
+        msPerQuery: Number((elapsedMs / Q).toFixed(3)),
+        hitsAt1,
+        hitsAt3,
+        hitsAt5,
+        nonTop1,
+        missesAt3,
+      };
     }
-    for (const line of nonTop1) {
-      console.log(line);
+
+    const e2eT0 = performance.now();
+    for (const q of queries) {
+      contextHybrid(dir, q.query, { limit: 5, fusionMode: 'minmax' });
     }
+    const e2eTotalMs = performance.now() - e2eT0;
+
+    return {
+      modeReports,
+      distractorCount: distractorIds.size,
+      endToEndContextHybridMsPerQuery: Number((e2eTotalMs / queries.length).toFixed(2)),
+    };
+  } finally {
+    closeSharedSqliteStore();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
-} finally {
-  closeSharedSqliteStore();
-  fs.rmSync(tmpRoot, { recursive: true, force: true });
+}
+
+export function runEvaluationSuite(opts = { silent: false }) {
+  const datasetA = evaluateModesOnCorpus(CORPUS, EVAL_QUERIES, true);
+  const datasetB = evaluateModesOnCorpus(DATASET_B_CORPUS, DATASET_B_QUERIES, false);
+
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'recall-eval-sym-'));
+  try {
+    // Seed symbol fixture files for symbol lookup evaluation
+    fs.mkdirSync(path.join(tmpRoot, 'src', 'auth'), { recursive: true });
+    fs.mkdirSync(path.join(tmpRoot, 'src', 'db'), { recursive: true });
+
+    fs.writeFileSync(
+      path.join(tmpRoot, 'src', 'auth', 'token-service.ts'),
+      [
+        'export const DEFAULT_CLOCK_TOLERANCE_SEC = 60;',
+        '',
+        'export type TokenGrantKind = "access" | "refresh";',
+        '',
+        'export interface TokenValidationOptions {',
+        '  clockToleranceSec: number;',
+        '  audience?: string;',
+        '}',
+        '',
+        'export function verifyBearerToken(rawHeader: string, opts?: TokenValidationOptions): boolean {',
+        '  return rawHeader.startsWith("Bearer ") && (opts?.clockToleranceSec ?? DEFAULT_CLOCK_TOLERANCE_SEC) >= 0;',
+        '}',
+        '',
+        'export class AuthTokenService {',
+        '  async issueRefreshToken(userId: string): Promise<string> {',
+        '    return `refresh_${userId}`;',
+        '  }',
+        '',
+        '  revokeSessionSync(sessionId: string): boolean {',
+        '    return sessionId.length > 0;',
+        '  }',
+        '',
+        '  private validateClaimsInternal(claims: Record<string, unknown>): boolean {',
+        '    return Boolean(claims.sub);',
+        '  }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+
+    fs.writeFileSync(
+      path.join(tmpRoot, 'src', 'db', 'ledger-repo.ts'),
+      [
+        'export const appendImmutableEntry = async (accountId: string, deltaCents: number): Promise<boolean> => {',
+        '  return accountId.length > 0 && Number.isInteger(deltaCents);',
+        '};',
+        '',
+        'export class LedgerRepository {',
+        '  commitTransactionSync(txId: string): void {',
+        '    void txId;',
+        '  }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+
+    initProject(tmpRoot);
+
+    // Evaluate Symbol & File Lookup (`whereIs`) against SYMBOL_EVAL_TARGETS
+    let symHitsAt1 = 0;
+    let symHitsAt5 = 0;
+    let symMrrSum = 0;
+    const symbolGaps = [];
+
+    for (const target of SYMBOL_EVAL_TARGETS) {
+      const results = whereIs(tmpRoot, target.query, 10);
+      const rankIdx = results.findIndex(
+        (r) => r.file === target.expectedFile && r.name === target.expectedName,
+      );
+      if (rankIdx === 0) symHitsAt1++;
+      if (rankIdx >= 0 && rankIdx < 5) symHitsAt5++;
+      if (rankIdx >= 0) {
+        symMrrSum += 1 / (rankIdx + 1);
+      } else {
+        symbolGaps.push({
+          query: target.query,
+          category: target.category,
+          expected: `${target.expectedFile} -> ${target.expectedName}`,
+          got: results.slice(0, 3).map((r) => `${r.file}:${r.line} ${r.name} (${r.kind})`),
+        });
+      }
+    }
+
+    const S = SYMBOL_EVAL_TARGETS.length;
+    const symbolReport = {
+      totalTargets: S,
+      hitsAt1: symHitsAt1,
+      hitsAt5: symHitsAt5,
+      recallAt1Pct: Number(((symHitsAt1 / S) * 100).toFixed(1)),
+      recallAt5Pct: Number(((symHitsAt5 / S) * 100).toFixed(1)),
+      mrr: Number((symMrrSum / S).toFixed(3)),
+      missingTargets: symbolGaps,
+    };
+
+    const report = {
+      datasetVersion: EVAL_DATASET_VERSION,
+      corpusSize: CORPUS.length,
+      distractorCount: datasetA.distractorCount,
+      queryCount: EVAL_QUERIES.length,
+      modes: datasetA.modeReports,
+      endToEndContextHybridMsPerQuery: datasetA.endToEndContextHybridMsPerQuery,
+      datasetB: {
+        corpusSize: DATASET_B_CORPUS.length,
+        queryCount: DATASET_B_QUERIES.length,
+        modes: datasetB.modeReports,
+      },
+      symbolLookup: symbolReport,
+    };
+
+    if (!opts.silent) {
+      const printTable = (title, corpusLen, qLen, distractorLen, modeReports) => {
+        console.log('============================================================================');
+        console.log(`  ${title}`);
+        console.log('============================================================================');
+        console.log(`Corpus: ${corpusLen} active memories${distractorLen ? ` + ${distractorLen} lifecycle distractors` : ''} | Queries: ${qLen}\n`);
+        console.log(
+          'Mode             | Rec@1  | Rec@3  | Prec@1 | Prec@3 | MRR   | nDCG@3 | nDCG@5 | Unnec@3 | Leaks | Tok/Q | ms/Q',
+        );
+        console.log(
+          '-----------------|--------|--------|--------|--------|-------|--------|--------|---------|-------|-------|-------',
+        );
+        for (const [mode, r] of Object.entries(modeReports)) {
+          console.log(
+            `${mode.padEnd(16)} | ${String(r.recallAt1Pct + '%').padStart(6)} | ${String(r.recallAt3Pct + '%').padStart(6)} | ${String(r.precisionAt1Pct + '%').padStart(6)} | ${String(r.precisionAt3Pct + '%').padStart(6)} | ${r.mrr.toFixed(3)} |  ${r.ndcgAt3.toFixed(3)} |  ${r.ndcgAt5.toFixed(3)} |  ${String(r.unnecessaryRateAt3Pct + '%').padStart(6)} | ${String(r.distractorLeakRatePct + '%').padStart(5)} | ${String(r.avgContextTokens).padStart(5)} | ${r.msPerQuery.toFixed(2)}`,
+          );
+        }
+      };
+
+      printTable(`DATASET A — BACKEND / ARCHITECTURE (${EVAL_DATASET_VERSION})`, CORPUS.length, EVAL_QUERIES.length, datasetA.distractorCount, datasetA.modeReports);
+      console.log(`\nEnd-to-end contextHybrid (with SQLite stat-key fast-path): ${report.endToEndContextHybridMsPerQuery} ms/query\n`);
+      printTable('DATASET B — FRONTEND / MOBILE / DATA / TYPOS (18 Queries)', DATASET_B_CORPUS.length, DATASET_B_QUERIES.length, 0, datasetB.modeReports);
+
+      console.log('\n----------------------------------------------------------------------------');
+      console.log('  SYMBOL & FILE LOOKUP COVERAGE EVALUATION (`whereIs`)');
+      console.log('----------------------------------------------------------------------------');
+      console.log(
+        `Targets: ${symbolReport.totalTargets} | Recall@1: ${symbolReport.hitsAt1}/${symbolReport.totalTargets} (${symbolReport.recallAt1Pct}%) | Recall@5: ${symbolReport.hitsAt5}/${symbolReport.totalTargets} (${symbolReport.recallAt5Pct}%) | MRR: ${symbolReport.mrr.toFixed(3)}`,
+      );
+      if (symbolReport.missingTargets.length > 0) {
+        console.log('\nMissing Ground-Truth Symbol / Query Categories:');
+        for (const gap of symbolReport.missingTargets) {
+          console.log(`  - [${gap.category}] query="${gap.query}" -> expected ${gap.expected} (got: ${gap.got.join(', ') || 'No match'})`);
+        }
+      }
+      console.log('============================================================================\n');
+    }
+
+    return report;
+  } finally {
+    closeSharedSqliteStore();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (isMain) {
+  runEvaluationSuite();
 }

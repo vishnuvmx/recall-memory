@@ -22,6 +22,8 @@ export interface HybridSearchOptions {
   securityContext?: SecurityContext;
   sqliteStore?: SqliteMemoryStore;
   fusionMode?: FusionMode;
+  /** Disable 64-dim MD5 feature-hash vector similarity channel. */
+  disableVector?: boolean;
 }
 
 export interface HybridSearchHit {
@@ -234,9 +236,13 @@ export function hybridSearch(
   const identifiers = extractTechnicalIdentifiers(qTrim);
   const qLower = qTrim.toLowerCase();
   const fusionMode: FusionMode = opts.fusionMode ?? 'minmax';
+  // 64-dim MD5 feature-hash vectors are disabled by default after 2-dataset ablation showed
+  // 0% Recall@1/Recall@3/MRR gain over Identifier + FTS5 BM25 + Corpus Co-Occurrence.
+  // Pass `disableVector: false` explicitly to opt back into the 64-dim MD5 vector channel.
+  const useVector = opts.disableVector === false;
 
-  // 1. Precompute query dense embedding
-  const queryEmbedding = getOrGenerateEmbedding(qTrim).vector;
+  // 1. Precompute query dense embedding only when vector channel is explicitly enabled
+  const queryEmbedding = useVector ? getOrGenerateEmbedding(qTrim).vector : null;
 
   // 2. Corpus-derived query expansion from the user's own active memories
   const expandedMap = expandQueryFromCorpus(memories, tokens);
@@ -357,13 +363,17 @@ export function hybridSearch(
     const ftsRaw = ftsScores.get(m.id) ?? 0;
     const bm25Score = fieldScore + ftsRaw * 1.2;
 
-    // 6. Dense Vector Similarity
-    const memEmbedding = opts.sqliteStore?.getEmbedding(m.id) ?? getOrGenerateEmbedding(`${m.title}\n${m.body}`).vector;
-    const similarity = Math.max(0, cosineSimilarity(queryEmbedding, memEmbedding));
-    const vectorScore = similarity * 6.0;
+    // 6. Dense Vector Similarity (only when enabled)
+    let similarity = 0;
+    let vectorScore = 0;
+    if (useVector && queryEmbedding) {
+      const memEmbedding = opts.sqliteStore?.getEmbedding(m.id) ?? getOrGenerateEmbedding(`${m.title}\n${m.body}`).vector;
+      similarity = Math.max(0, cosineSimilarity(queryEmbedding, memEmbedding));
+      vectorScore = similarity * 6.0;
+    }
 
     // Must have at least some lexical, expanded, or strong vector match to be considered
-    if (exactScore === 0 && bm25Score === 0 && expansionScore < 0.8 && similarity < 0.45) {
+    if (exactScore === 0 && bm25Score === 0 && expansionScore < 0.8 && (!useVector || similarity < 0.45)) {
       continue;
     }
 

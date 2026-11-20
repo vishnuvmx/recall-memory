@@ -145,6 +145,7 @@ export function parseGitignore(root: string): Set<string> {
 export interface ScanProjectOptions {
   profile?: ProfileTier;
   recallDir?: string;
+  preloadedLandmarks?: FileLandmarks[];
 }
 
 export function scanProject(root: string, maxDepth = 3, opts?: ScanProjectOptions): ProjectMapData {
@@ -258,7 +259,12 @@ export function scanProject(root: string, maxDepth = 3, opts?: ScanProjectOption
     maxSymbols = 30;
   }
 
-  const landmarks = scanLandmarks(root, minLines, maxFiles, maxSymbols, opts?.recallDir);
+  const landmarks = opts?.preloadedLandmarks
+    ? opts.preloadedLandmarks
+        .filter((f) => f.totalLines >= minLines && f.landmarks.length > 0)
+        .slice(0, maxFiles)
+        .map((f) => ({ ...f, landmarks: f.landmarks.slice(0, maxSymbols) }))
+    : scanLandmarks(root, minLines, maxFiles, maxSymbols, opts?.recallDir);
 
   return {
     projectType,
@@ -392,7 +398,12 @@ export function renderProjectMap(existing: string, data: ProjectMapData, profile
   return applyManagedBlock(base, content, MAP_BLOCK_NAME);
 }
 
-export function generateProjectMap(root: string, recallDir: string, profile?: ProfileTier): string {
+export function generateProjectMap(
+  root: string,
+  recallDir: string,
+  profile?: ProfileTier,
+  preloadedLandmarks?: FileLandmarks[],
+): string {
   let effectiveProfile: ProfileTier = profile ?? 'standard';
   if (!profile) {
     try {
@@ -401,7 +412,7 @@ export function generateProjectMap(root: string, recallDir: string, profile?: Pr
       effectiveProfile = 'standard';
     }
   }
-  const data = scanProject(root, 3, { profile: effectiveProfile, recallDir });
+  const data = scanProject(root, 3, { profile: effectiveProfile, recallDir, preloadedLandmarks });
   const file = resolveInside(recallDir, 'PROJECT_MAP.md');
   const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
   const rendered = renderProjectMap(existing, data, effectiveProfile);

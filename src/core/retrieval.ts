@@ -1,10 +1,12 @@
 import type { MemoryType } from '../schemas/index.js';
+import { today } from '../utils/fs.js';
 import type { Memory } from './memory.js';
 
 export interface SearchOptions {
   limit?: number;
   includeProposed?: boolean;
   includeArchived?: boolean;
+  includeSuperseded?: boolean;
   type?: MemoryType;
   tag?: string;
   minScore?: number;
@@ -126,9 +128,13 @@ export function search(memories: Memory[], query: string, opts: SearchOptions = 
   const hits: SearchHit[] = [];
 
   const now = Date.now();
+  const todayStr = today();
   for (const m of memories) {
     if (m.status === 'archived' && !opts.includeArchived) continue;
     if (m.status === 'proposed' && !opts.includeProposed) continue;
+    if (m.status === 'superseded' && !opts.includeSuperseded) continue;
+    if (m.deprecated && !opts.includeArchived && !opts.includeSuperseded) continue;
+    if (m.expiresAt && m.expiresAt < todayStr) continue;
     if (opts.type && m.type !== opts.type) continue;
     if (opts.tag && !m.tags.some((t) => t.toLowerCase() === opts.tag!.toLowerCase())) continue;
 

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.js';
 import { repoChanges } from './git.js';
+import { extractLandmarks, loadLandmarksCache } from './landmarks.js';
 import { redactSecrets } from '../security/secrets.js';
 import { atomicWrite, resolveInside, today } from '../utils/fs.js';
 
@@ -13,6 +14,8 @@ export interface CheckpointOptions {
   maxEntries?: number;
   model?: string;
   referencedFiles?: string[];
+  precomputedModifiedFiles?: string[];
+  conversationId?: string;
 }
 
 export interface CheckpointResult {
@@ -173,62 +176,87 @@ export function pruneSessions(
   return { removedCount: res.removedCount, remainingCount: res.retained.length };
 }
 
-import * as fsNode from 'node:fs';
-import * as pathNode from 'node:path';
+const CODE_FILE_EXT_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|c|cpp|cs|rb|php|dart|kt|swift)$/i;
 
-const CODE_FILE_EXT_RE = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|c|cpp|cs|rb|php)$/i;
-const CONTROL_KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'typeof', 'delete', 'await', 'yield']);
+interface TaskContextCache {
+  conversationId?: string;
+  referencedFiles: string[];
+  updatedAt: string;
+}
 
-export function buildActiveFileSymbolMap(root: string, files: string[]): string[] {
+function loadTaskContext(recallDir: string): TaskContextCache {
+  const file = path.join(recallDir, '.cache', 'task-context.json');
+  try {
+    if (fs.existsSync(file)) {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as Partial<TaskContextCache>;
+      if (parsed && Array.isArray(parsed.referencedFiles)) {
+        return {
+          conversationId: typeof parsed.conversationId === 'string' ? parsed.conversationId : undefined,
+          referencedFiles: parsed.referencedFiles.filter((f): f is string => typeof f === 'string'),
+          updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : '',
+        };
+      }
+    }
+  } catch {
+    // ignore corrupt cache
+  }
+  return { referencedFiles: [], updatedAt: '' };
+}
+
+function saveTaskContext(recallDir: string, ctx: TaskContextCache): void {
+  const file = path.join(recallDir, '.cache', 'task-context.json');
+  try {
+    atomicWrite(file, `${JSON.stringify(ctx, null, 2)}\n`);
+  } catch {
+    // non-fatal
+  }
+}
+
+export function buildActiveFileSymbolMap(root: string, files: string[], recallDir?: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  const rootAbs = pathNode.resolve(root);
+  const rootAbs = path.resolve(root);
+  const cachedStore = recallDir ? loadLandmarksCache(recallDir) : null;
 
   for (const rawFile of files) {
     const rel = rawFile.replace(/\\/g, '/').trim();
     if (!rel || seen.has(rel) || !CODE_FILE_EXT_RE.test(rel)) continue;
     seen.add(rel);
 
-    const abs = pathNode.resolve(rootAbs, rel);
-    if (!abs.startsWith(rootAbs + pathNode.sep) && abs !== rootAbs) continue;
-    let content: string;
+    const abs = path.resolve(rootAbs, rel);
+    if (!abs.startsWith(rootAbs + path.sep) && abs !== rootAbs) continue;
+    let stat: fs.Stats;
     try {
-      const stat = fsNode.statSync(abs);
+      stat = fs.statSync(abs);
       if (!stat.isFile() || stat.size > 256 * 1024) continue;
-      content = fsNode.readFileSync(abs, 'utf8');
     } catch {
       continue;
     }
 
-    const lines = content.split(/\r?\n/);
-    const symbols: Array<{ name: string; line: number }> = [];
-    const seenSyms = new Set<string>();
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (!line) continue;
-      const m =
-        line.match(/^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)/) ??
-        line.match(/^\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)/) ??
-        line.match(/^\s*(?:export\s+)?(?:interface|type|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/) ??
-        line.match(/^\s*(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>/) ??
-        line.match(/^\s+(?:public\s+|private\s+|protected\s+|static\s+|async\s+)*(?:get\s+|set\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*\([^;]*\{\s*$/) ??
-        line.match(/^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)/) ??
-        line.match(/^\s*func\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_]*)/) ??
-        line.match(/^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)/);
-
-      if (m && m[1] && !CONTROL_KEYWORDS.has(m[1]) && !seenSyms.has(m[1])) {
-        seenSyms.add(m[1]);
-        symbols.push({ name: m[1], line: i + 1 });
-        if (symbols.length >= 12) break;
+    let lineCount = 0;
+    let symbols: Array<{ name: string; line: number }> = [];
+    const cached = cachedStore?.files[rel];
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      lineCount = cached.totalLines;
+      symbols = cached.landmarks.filter((lm) => lm.kind !== 'section').slice(0, 12);
+    } else {
+      try {
+        const content = fs.readFileSync(abs, 'utf8');
+        lineCount = content.split(/\r?\n/).length;
+        const ext = path.extname(rel).toLowerCase();
+        symbols = extractLandmarks(content, ext)
+          .filter((lm) => lm.kind !== 'section')
+          .slice(0, 12);
+      } catch {
+        continue;
       }
     }
 
     if (symbols.length > 0) {
       const symText = symbols.map((s) => `\`${s.name}\` (:${s.line})`).join(', ');
-      out.push(`- \`${rel}\` (${lines.length} lines): ${symText}`);
+      out.push(`- \`${rel}\` (${lineCount} lines): ${symText}`);
     } else {
-      out.push(`- \`${rel}\` (${lines.length} lines)`);
+      out.push(`- \`${rel}\` (${lineCount} lines)`);
     }
     if (out.length >= 8) break;
   }
@@ -285,7 +313,7 @@ export function recordCheckpoint(
   summary?: string,
   opts: CheckpointOptions = {}
 ): CheckpointResult {
-  const rawChanges = repoChanges(root) ?? [];
+  const rawChanges = opts.precomputedModifiedFiles ?? (repoChanges(root) ?? []);
   const modifiedFiles = opts.clear ? [] : rawChanges.slice(0, 20); // Top 20 active files
 
   let cleanSummary = summary?.trim();
@@ -312,19 +340,38 @@ export function recordCheckpoint(
   const logFile = path.join(sessionLogDir, 'session-log.md');
   const existingRaw = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
 
+  // Non-destructive task context: merge referenced files across turns of the same conversation
+  // so a follow-up turn never wipes out the active file symbol map from earlier turns.
+  const prevTaskCtx = opts.clear ? { referencedFiles: [], updatedAt: '' } : loadTaskContext(recallDir);
+  const incomingReferenced = opts.clear ? [] : (opts.referencedFiles ?? []);
+  const shouldCarryForward =
+    !opts.clear &&
+    (!opts.conversationId || !prevTaskCtx.conversationId || prevTaskCtx.conversationId === opts.conversationId);
+  const mergedReferencedRaw = shouldCarryForward
+    ? [...incomingReferenced, ...prevTaskCtx.referencedFiles]
+    : incomingReferenced;
+  const referenced = [...new Set(mergedReferencedRaw)].filter((f) => !modifiedFiles.includes(f)).slice(0, 10);
+
   // The Stop hook fires after every agent turn; don't log a duplicate entry when summary + files match.
   if (opts.auto && !opts.clear) {
     const last = parseSessionLogEntries(existingRaw).at(-1);
     const lastFiles = last?.modifiedFiles ?? [];
     const sameFiles = lastFiles.length === modifiedFiles.length && lastFiles.every((f, i) => f === modifiedFiles[i]);
     const sameSummary = last?.summary === cleanSummary || (!summary?.trim() && last?.summary.startsWith('Session '));
-    if (last && sameFiles && sameSummary) {
+    if (last && sameFiles && sameSummary && incomingReferenced.length === 0) {
       return { timestamp: last.timestamp, summary: last.summary, modifiedFiles, skipped: true };
     }
   }
 
-  const referenced = (opts.referencedFiles ?? []).filter((f) => !modifiedFiles.includes(f)).slice(0, 10);
-  const activeFileMap = buildActiveFileSymbolMap(root, [...modifiedFiles, ...referenced]);
+  const activeFileMap = buildActiveFileSymbolMap(root, [...modifiedFiles, ...referenced], recallDir);
+
+  if (opts.clear || incomingReferenced.length > 0 || prevTaskCtx.conversationId !== opts.conversationId) {
+    saveTaskContext(recallDir, {
+      conversationId: opts.conversationId,
+      referencedFiles: referenced,
+      updatedAt: timestamp,
+    });
+  }
 
   const result: CheckpointResult = {
     timestamp,

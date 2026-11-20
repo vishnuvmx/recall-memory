@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config.js';
-import { scanLandmarks, type FileLandmarks } from './landmarks.js';
+import { readCachedLandmarks, scanLandmarks, type FileLandmarks } from './landmarks.js';
 import { loadSearchableMemories, type Memory } from './memory.js';
 import { computeMemoriesDigest } from './sqlite-store.js';
 import type { ProfileTier } from '../schemas/index.js';
@@ -17,8 +17,29 @@ export interface WorkspaceFingerprint {
   passportHash?: string;
   mapHash?: string;
   memoriesHash?: string;
+  memoriesStatKey?: string;
+  manifestStatKey?: string;
+  gitHead?: string;
   lastChatTurnHash?: string;
   lastConversationId?: string;
+}
+
+/** Fast stat-only key over project manifest files (`package.json`, `README.md`, etc.) with 0 file reads. */
+export function computeManifestStatKey(root: string): string {
+  const names = ['package.json', 'tsconfig.json', 'Cargo.toml', 'pyproject.toml', 'requirements.txt', 'go.mod', 'pubspec.yaml', 'README.md'];
+  const parts: string[] = [];
+  for (const name of names) {
+    const abs = path.join(root, name);
+    try {
+      if (fs.existsSync(abs)) {
+        const st = fs.statSync(abs);
+        parts.push(`${name}:${st.size}:${Math.floor(st.mtimeMs)}`);
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return parts.join('|');
 }
 
 export interface ProjectIdentity {
@@ -382,7 +403,13 @@ export function passportMaxChars(profile: ProfileTier): number {
 export function syncPassport(
   root: string,
   recallDir: string,
-  opts: { profile?: ProfileTier; force?: boolean; memories?: Memory[] } = {},
+  opts: {
+    profile?: ProfileTier;
+    force?: boolean;
+    memories?: Memory[];
+    preloadedFiles?: FileLandmarks[];
+    useCachedLandmarks?: boolean;
+  } = {},
 ): PassportSyncResult {
   let profile: ProfileTier = opts.profile ?? 'standard';
   if (!opts.profile) {
@@ -394,15 +421,22 @@ export function syncPassport(
   }
 
   const identity = extractProjectIdentity(root);
-  const files = scanLandmarks(root, 1, Number.POSITIVE_INFINITY, 16, recallDir);
+  const files =
+    opts.preloadedFiles ??
+    (opts.useCachedLandmarks ? readCachedLandmarks(recallDir, 1, Number.POSITIVE_INFINITY, 16) : null) ??
+    scanLandmarks(root, 1, Number.POSITIVE_INFINITY, 16, recallDir);
   const searchable = opts.memories ?? loadSearchableMemories(recallDir);
   const passportHash = computePassportHash(identity, files, searchable, profile);
 
   const file = resolveInside(recallDir, 'PASSPORT.md');
   const fp = loadFingerprint(recallDir);
+  const manifestStatKey = computeManifestStatKey(root);
 
   if (!opts.force && fp.passportHash === passportHash && fs.existsSync(file)) {
     const existingLen = fs.statSync(file).size;
+    if (fp.manifestStatKey !== manifestStatKey) {
+      saveFingerprint(recallDir, { ...fp, manifestStatKey });
+    }
     return {
       file,
       updated: false,
@@ -424,6 +458,7 @@ export function syncPassport(
   saveFingerprint(recallDir, {
     ...fp,
     passportHash,
+    manifestStatKey,
     memoriesHash: computeMemoriesDigest(searchable),
   });
 

@@ -6,7 +6,7 @@ import { DEFAULT_IGNORED_DIRS, TEST_FILE_REGEX, createGitignoreFilter } from './
 
 export interface Landmark {
   name: string;
-  kind: 'class' | 'method' | 'function' | 'section' | 'interface' | 'type';
+  kind: 'class' | 'method' | 'function' | 'section' | 'interface' | 'type' | 'const';
   line: number;
   exported?: boolean;
 }
@@ -98,25 +98,59 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
         continue;
       }
       // Functions / Arrow functions (skip nested inner helper functions when indented and unexported)
-      const fnMatch = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function(?:\s*\*|\s+([A-Za-z0-9_]+))\s*(?:\(|<)/.exec(line);
+      const fnMatch = /^(?:export\s+)?(?:default\s+)?(?:async\s+)?function(?:\s*\*|\s+([A-Za-z0-9_$]+))\s*(?:\(|<)/.exec(line);
       if (fnMatch && fnMatch[1]) {
         if (isExported || indent === 0) {
           landmarks.push({ name: fnMatch[1]!, kind: 'function', line: lineNum, exported: isExported });
         }
         continue;
       }
-      const constFnMatch = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_]+)\s*(?::\s*[^=]+)?\s*=\s*(?:async\s*)?(?:\([^)]*\)|[a-zA-Z0-9_]+)\s*=>/.exec(line);
+      const constFnMatch =
+        /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*(?::\s*[^=]+)?\s*=\s*(?:async\s*)?(?:<[^>]+>\s*)?(?:\([^)]*\)|[a-zA-Z0-9_$]+)\s*(?::\s*[^=]+)?\s*=>/.exec(
+          line,
+        );
       if (constFnMatch) {
         if (isExported || indent === 0) {
           landmarks.push({ name: constFnMatch[1]!, kind: 'function', line: lineNum, exported: isExported });
         }
         continue;
       }
-      const methodMatch = /^(?:(?:public|private|protected|static|async|\*|override|readonly)\s+)+([a-zA-Z0-9_]+)\s*(?:<[^>]+>)?\s*\([^)]*\)\s*(?::\s*[^{]+)?\{/.exec(line);
-      if (methodMatch && indent <= 4) {
-        const name = methodMatch[1]!;
-        if (!['if', 'for', 'while', 'switch', 'catch', 'constructor'].includes(name)) {
-          landmarks.push({ name, kind: 'method', line: lineNum, exported: false });
+      // Exported enums and constants (e.g. export const DEFAULT_TIMEOUT = 60; export enum Mode {)
+      if (isExported && indent === 0) {
+        const exportEnumConst = /^export\s+(?:const|enum)\s+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(line);
+        if (exportEnumConst && exportEnumConst[1]) {
+          landmarks.push({ name: exportEnumConst[1]!, kind: 'const', line: lineNum, exported: true });
+          continue;
+        }
+      }
+      // Class methods (with optional access/async/static modifiers at class-body indentation)
+      if (indent >= 2 && indent <= 4) {
+        const methodMatch =
+          /^(?:(?:public|private|protected|static|async|\*|override|readonly|get|set)\s+)*([a-zA-Z_$][a-zA-Z0-9_$]*)\s*(?:<[^>]+>)?\s*\([^;]*\)\s*(?::\s*[^{;]+)?\{/.exec(
+            line,
+          );
+        if (methodMatch && methodMatch[1]) {
+          const name = methodMatch[1]!;
+          if (
+            ![
+              'if',
+              'for',
+              'while',
+              'switch',
+              'catch',
+              'constructor',
+              'return',
+              'throw',
+              'else',
+              'try',
+              'finally',
+              'do',
+              'new',
+              'function',
+            ].includes(name)
+          ) {
+            landmarks.push({ name, kind: 'method', line: lineNum, exported: false });
+          }
         }
       }
     } else if (ext === '.kt') {
@@ -225,14 +259,335 @@ export function extractLandmarks(content: string, ext: string): Landmark[] {
   return landmarks;
 }
 
-const LANDMARK_CACHE_VERSION = 2;
+const LANDMARK_CACHE_VERSION = 3;
 
-interface CacheRecord {
+export interface CacheRecord {
   v?: number;
   size?: number;
   mtimeMs: number;
   totalLines: number;
   landmarks: Landmark[];
+}
+
+export interface OtherFileRecord {
+  size: number;
+  mtimeMs: number;
+  totalLines?: number;
+}
+
+export interface LandmarksCacheStore {
+  v: number;
+  files: Record<string, CacheRecord>;
+  otherFiles: Record<string, OtherFileRecord>;
+}
+
+export function landmarksCachePath(recallDir: string): string {
+  return path.join(recallDir, '.cache', 'landmarks-cache.json');
+}
+
+export function loadLandmarksCache(recallDir: string): LandmarksCacheStore | null {
+  const cacheFile = landmarksCachePath(recallDir);
+  if (!fs.existsSync(cacheFile)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) as Partial<LandmarksCacheStore>;
+    if (
+      parsed &&
+      parsed.v === LANDMARK_CACHE_VERSION &&
+      parsed.files &&
+      typeof parsed.files === 'object' &&
+      parsed.otherFiles &&
+      typeof parsed.otherFiles === 'object'
+    ) {
+      return parsed as LandmarksCacheStore;
+    }
+  } catch {
+    // ignore corrupt or older v2 cache
+  }
+  return null;
+}
+
+export function saveLandmarksCache(recallDir: string, store: LandmarksCacheStore): void {
+  const cacheFile = landmarksCachePath(recallDir);
+  try {
+    const cacheDir = path.dirname(cacheFile);
+    if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+    fs.writeFileSync(cacheFile, JSON.stringify(store), 'utf8');
+  } catch {
+    // ignore cache write failures
+  }
+}
+
+function exportedSignature(landmarks: Landmark[]): string {
+  return landmarks
+    .filter((lm) => lm.kind !== 'section')
+    .map((lm) => `${lm.exported ? 'E' : 'I'}:${lm.kind}:${lm.name}`)
+    .join(',');
+}
+
+export function materializeFileLandmarks(
+  store: LandmarksCacheStore,
+  minLines = 1,
+  maxFiles = Number.POSITIVE_INFINITY,
+  maxSymbols = Number.POSITIVE_INFINITY,
+): FileLandmarks[] {
+  const results: FileLandmarks[] = [];
+  for (const [rel, rec] of Object.entries(store.files)) {
+    if (rec.totalLines >= minLines && rec.landmarks.length > 0) {
+      results.push({
+        relativePath: rel,
+        totalLines: rec.totalLines,
+        landmarks: maxSymbols === Number.POSITIVE_INFINITY ? rec.landmarks : rec.landmarks.slice(0, maxSymbols),
+      });
+    }
+  }
+  results.sort((a, b) => b.totalLines - a.totalLines);
+  return maxFiles === Number.POSITIVE_INFINITY ? results : results.slice(0, maxFiles);
+}
+
+/**
+ * Reads cached FileLandmarks directly from `.recall/.cache/landmarks-cache.json` with 0 directory walks.
+ * Returns null if no valid v3 cache exists yet.
+ */
+export function readCachedLandmarks(
+  recallDir: string,
+  minLines = 1,
+  maxFiles = Number.POSITIVE_INFINITY,
+  maxSymbols = Number.POSITIVE_INFINITY,
+): FileLandmarks[] | null {
+  const store = loadLandmarksCache(recallDir);
+  if (!store) return null;
+  return materializeFileLandmarks(store, minLines, maxFiles, maxSymbols);
+}
+
+export interface IncrementalLandmarksResult {
+  files: FileLandmarks[];
+  store: LandmarksCacheStore;
+  changedCount: number;
+  deletedCount: number;
+  exportedSurfaceChanged: boolean;
+}
+
+/**
+ * Incrementally updates `.recall/.cache/landmarks-cache.json` (both code symbols and non-code file paths).
+ * - If `opts.changedFiles` is provided AND a valid v3 cache exists, updates ONLY those specific files
+ *   with ZERO repository directory walks!
+ * - Otherwise performs ONE unified walk across the project tree, reading only files whose mtime or size changed.
+ */
+export function syncLandmarksIncremental(
+  root: string,
+  recallDir?: string,
+  opts: {
+    changedFiles?: string[];
+    minLines?: number;
+    maxFiles?: number;
+    maxSymbols?: number;
+  } = {},
+): IncrementalLandmarksResult {
+  const minLines = opts.minLines ?? 1;
+  const maxFiles = opts.maxFiles ?? Number.POSITIVE_INFINITY;
+  const maxSymbols = opts.maxSymbols ?? Number.POSITIVE_INFINITY;
+
+  const existingStore = recallDir ? loadLandmarksCache(recallDir) : null;
+  const store: LandmarksCacheStore = existingStore ?? { v: LANDMARK_CACHE_VERSION, files: {}, otherFiles: {} };
+
+  let cacheDirty = !existingStore;
+  let changedCount = 0;
+  let deletedCount = 0;
+  let exportedSurfaceChanged = !existingStore;
+
+  const updateSingleFile = (rel: string, fullPath: string, isGitignored: (r: string, isDir: boolean) => boolean): void => {
+    const base = path.basename(rel);
+    if (isGitignored(rel, false) || TEST_FILE_REGEX.test(base)) {
+      if (store.files[rel]) {
+        delete store.files[rel];
+        deletedCount++;
+        exportedSurfaceChanged = true;
+        cacheDirty = true;
+      }
+      if (store.otherFiles[rel]) {
+        delete store.otherFiles[rel];
+        deletedCount++;
+        cacheDirty = true;
+      }
+      return;
+    }
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(fullPath);
+    } catch {
+      if (store.files[rel]) {
+        delete store.files[rel];
+        deletedCount++;
+        exportedSurfaceChanged = true;
+        cacheDirty = true;
+      }
+      if (store.otherFiles[rel]) {
+        delete store.otherFiles[rel];
+        deletedCount++;
+        cacheDirty = true;
+      }
+      return;
+    }
+    if (!stat.isFile() || stat.size > 2 * 1024 * 1024) return;
+
+    const ext = path.extname(base).toLowerCase();
+    if (SUPPORTED_EXTS.has(ext)) {
+      const cached = store.files[rel];
+      if (!cached || cached.v !== LANDMARK_CACHE_VERSION || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+        const oldSig = cached ? exportedSignature(cached.landmarks) : '';
+        const content = fs.readFileSync(fullPath, 'utf8');
+        const linesCount = content.split('\n').length;
+        const landmarks = extractLandmarks(content, ext);
+        const newSig = exportedSignature(landmarks);
+        if (!cached || oldSig !== newSig) {
+          exportedSurfaceChanged = true;
+        }
+        store.files[rel] = {
+          v: LANDMARK_CACHE_VERSION,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          totalLines: linesCount,
+          landmarks,
+        };
+        changedCount++;
+        cacheDirty = true;
+      }
+    } else {
+      const cached = store.otherFiles[rel];
+      if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+        store.otherFiles[rel] = { size: stat.size, mtimeMs: stat.mtimeMs };
+        changedCount++;
+        cacheDirty = true;
+      }
+    }
+  };
+
+  // Fast-path: caller already knows exact changed paths (e.g., from git status) and v3 cache exists
+  if (existingStore && opts.changedFiles) {
+    if (opts.changedFiles.length > 0) {
+      const isGitignored = createGitignoreFilter(root);
+      for (const rawRel of opts.changedFiles) {
+        const rel = toPosix(rawRel).replace(/^\/+/, '');
+        if (!rel || rel.startsWith('.recall/')) continue;
+        const topSeg = rel.split('/')[0] ?? '';
+        if (DEFAULT_IGNORED_DIRS.has(topSeg)) continue;
+        updateSingleFile(rel, path.join(root, rel), isGitignored);
+      }
+      if (recallDir && cacheDirty) {
+        saveLandmarksCache(recallDir, store);
+      }
+    }
+    return {
+      files: materializeFileLandmarks(store, minLines, maxFiles, maxSymbols),
+      store,
+      changedCount,
+      deletedCount,
+      exportedSurfaceChanged,
+    };
+  }
+
+  // Unified single-pass repository walk (populates BOTH code landmarks and non-code files)
+  const seenCode = new Set<string>();
+  const seenOther = new Set<string>();
+  const isGitignored = createGitignoreFilter(root);
+
+  function walk(currentDir: string, depth: number): void {
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') && entry.name !== '.gitignore' && entry.name !== '.env.example') {
+        if (entry.isDirectory()) continue;
+      }
+      const fullPath = path.join(currentDir, entry.name);
+      const rel = toPosix(path.relative(root, fullPath));
+      if (entry.isDirectory()) {
+        if (DEFAULT_IGNORED_DIRS.has(entry.name) || isGitignored(rel, true)) continue;
+        walk(fullPath, depth + 1);
+      } else if (entry.isFile()) {
+        if (isGitignored(rel, false) || TEST_FILE_REGEX.test(entry.name)) continue;
+        const ext = path.extname(entry.name).toLowerCase();
+        if (SUPPORTED_EXTS.has(ext)) {
+          seenCode.add(rel);
+          try {
+            const stat = fs.statSync(fullPath);
+            if (stat.size > 2 * 1024 * 1024) continue;
+            const cached = store.files[rel];
+            if (!cached || cached.v !== LANDMARK_CACHE_VERSION || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+              const oldSig = cached ? exportedSignature(cached.landmarks) : '';
+              const content = fs.readFileSync(fullPath, 'utf8');
+              const linesCount = content.split('\n').length;
+              const landmarks = extractLandmarks(content, ext);
+              if (!cached || oldSig !== exportedSignature(landmarks)) {
+                exportedSurfaceChanged = true;
+              }
+              store.files[rel] = {
+                v: LANDMARK_CACHE_VERSION,
+                size: stat.size,
+                mtimeMs: stat.mtimeMs,
+                totalLines: linesCount,
+                landmarks,
+              };
+              changedCount++;
+              cacheDirty = true;
+            }
+          } catch {
+            // ignore unreadable
+          }
+        } else if (depth <= 5) {
+          seenOther.add(rel);
+          try {
+            const stat = fs.statSync(fullPath);
+            if (stat.size > 2 * 1024 * 1024) continue;
+            const cached = store.otherFiles[rel];
+            if (!cached || cached.mtimeMs !== stat.mtimeMs || cached.size !== stat.size) {
+              store.otherFiles[rel] = { size: stat.size, mtimeMs: stat.mtimeMs };
+              changedCount++;
+              cacheDirty = true;
+            }
+          } catch {
+            // ignore unreadable
+          }
+        }
+      }
+    }
+  }
+
+  walk(root, 0);
+
+  // Evict deleted or newly ignored files
+  for (const key of Object.keys(store.files)) {
+    if (!seenCode.has(key)) {
+      delete store.files[key];
+      deletedCount++;
+      exportedSurfaceChanged = true;
+      cacheDirty = true;
+    }
+  }
+  for (const key of Object.keys(store.otherFiles)) {
+    if (!seenOther.has(key)) {
+      delete store.otherFiles[key];
+      deletedCount++;
+      cacheDirty = true;
+    }
+  }
+
+  if (recallDir && cacheDirty) {
+    saveLandmarksCache(recallDir, store);
+  }
+
+  return {
+    files: materializeFileLandmarks(store, minLines, maxFiles, maxSymbols),
+    store,
+    changedCount,
+    deletedCount,
+    exportedSurfaceChanged,
+  };
 }
 
 /**
@@ -245,107 +600,7 @@ export function scanLandmarks(
   maxSymbols = 12,
   recallDir?: string,
 ): FileLandmarks[] {
-  const results: FileLandmarks[] = [];
-  const seenFiles = new Set<string>();
-  const isGitignored = createGitignoreFilter(root);
-
-  // Load MTime cache if recallDir is provided
-  let cacheFile = '';
-  let cache: Record<string, CacheRecord> = {};
-  let cacheDirty = false;
-
-  if (recallDir) {
-    cacheFile = path.join(recallDir, '.cache', 'landmarks-cache.json');
-    if (fs.existsSync(cacheFile)) {
-      try {
-        cache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-      } catch {
-        cache = {};
-      }
-    }
-  }
-
-  function walk(currentDir: string): void {
-    let entries: fs.Dirent[] = [];
-    try {
-      entries = fs.readdirSync(currentDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      if (entry.name.startsWith('.') && entry.name !== '.gitignore') {
-        if (entry.isDirectory()) continue;
-      }
-      const rel = toPosix(path.relative(root, path.join(currentDir, entry.name)));
-      if (entry.isDirectory()) {
-        if (DEFAULT_IGNORED_DIRS.has(entry.name) || isGitignored(rel, true)) continue;
-        walk(path.join(currentDir, entry.name));
-      } else if (entry.isFile()) {
-        if (isGitignored(rel, false) || TEST_FILE_REGEX.test(entry.name)) continue;
-        const ext = path.extname(entry.name).toLowerCase();
-
-        if (!SUPPORTED_EXTS.has(ext)) continue;
-
-        try {
-          const fullPath = path.join(currentDir, entry.name);
-          const stat = fs.statSync(fullPath);
-          if (stat.size > 2 * 1024 * 1024) continue; // skip files > 2 MB
-          seenFiles.add(rel);
-
-          let linesCount = 0;
-          let landmarks: Landmark[] = [];
-
-          const cached = cache[rel];
-          if (cached && cached.v === LANDMARK_CACHE_VERSION && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
-            linesCount = cached.totalLines;
-            landmarks = cached.landmarks;
-          } else {
-            const content = fs.readFileSync(fullPath, 'utf8');
-            linesCount = content.split('\n').length;
-            landmarks = extractLandmarks(content, ext);
-            cache[rel] = { v: LANDMARK_CACHE_VERSION, size: stat.size, mtimeMs: stat.mtimeMs, totalLines: linesCount, landmarks };
-            cacheDirty = true;
-          }
-
-          if (linesCount >= minLines && landmarks.length > 0) {
-            results.push({
-              relativePath: rel,
-              totalLines: linesCount,
-              landmarks: landmarks.slice(0, maxSymbols),
-            });
-          }
-        } catch {
-          // ignore unreadable files
-        }
-      }
-    }
-  }
-
-  walk(root);
-
-  // Evict deleted or newly ignored files from landmark cache
-  for (const key of Object.keys(cache)) {
-    if (!seenFiles.has(key)) {
-      delete cache[key];
-      cacheDirty = true;
-    }
-  }
-
-  // Write updated cache if dirty
-  if (recallDir && cacheDirty) {
-    try {
-      const cacheDir = path.dirname(cacheFile);
-      if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-      fs.writeFileSync(cacheFile, JSON.stringify(cache), 'utf8');
-    } catch {
-      // ignore cache write failures
-    }
-  }
-
-  // Sort descending by totalLines so the biggest files come first
-  results.sort((a, b) => b.totalLines - a.totalLines);
-  return results.slice(0, maxFiles);
+  return syncLandmarksIncremental(root, recallDir, { minLines, maxFiles, maxSymbols }).files;
 }
 
 export function formatLandmarksMarkdown(files: FileLandmarks[]): string {

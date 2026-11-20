@@ -1,0 +1,1020 @@
+{
+  "metadata": {
+    "suiteVersion": "recall-bench-v1",
+    "datasetVersion": "recall-bench-ds-v1",
+    "timestamp": "2026-11-20T06:49:09.760Z",
+    "gitCommit": "1aaca5c",
+    "gitDirty": true,
+    "cpuModel": "12th Gen Intel(R) Core(TM) i5-12450H",
+    "cpuCores": 12,
+    "os": "Windows_NT 10.0.26300 (x64)",
+    "nodeVersion": "v24.12.0",
+    "totalMemGb": 15.7
+  },
+  "fixtureScaling": {
+    "small": {
+      "sourceFiles": 15,
+      "wallMs": 196,
+      "cpuMs": 187,
+      "io": {
+        "dirsWalked": 63,
+        "filesStatted": 44,
+        "uniqueFilesStatted": 22,
+        "filesRead": 55,
+        "uniqueFilesRead": 29,
+        "bytesRead": 116411,
+        "filesWritten": 27,
+        "bytesWritten": 25880
+      }
+    },
+    "medium": {
+      "sourceFiles": 80,
+      "wallMs": 182.71,
+      "cpuMs": 126,
+      "io": {
+        "dirsWalked": 93,
+        "filesStatted": 174,
+        "uniqueFilesStatted": 87,
+        "filesRead": 120,
+        "uniqueFilesRead": 94,
+        "bytesRead": 913206,
+        "filesWritten": 27,
+        "bytesWritten": 61707
+      }
+    },
+    "large": {
+      "sourceFiles": 240,
+      "wallMs": 308.73,
+      "cpuMs": 203,
+      "io": {
+        "dirsWalked": 93,
+        "filesStatted": 494,
+        "uniqueFilesStatted": 247,
+        "filesRead": 280,
+        "uniqueFilesRead": 254,
+        "bytesRead": 3094923,
+        "filesWritten": 27,
+        "bytesWritten": 138952
+      }
+    }
+  },
+  "workloads": {
+    "writeScaling": {
+      "first5": {
+        "n": 5,
+        "min": 48.114,
+        "p50": 49.267,
+        "mean": 51.575,
+        "p95": 58.139,
+        "p99": 59.37,
+        "max": 59.678,
+        "sd": 4.76,
+        "cvPct": 9.2,
+        "ci95": 4.172
+      },
+      "last5": {
+        "n": 5,
+        "min": 79.074,
+        "p50": 81.838,
+        "mean": 81.617,
+        "p95": 83.36,
+        "p99": 83.57,
+        "max": 83.622,
+        "sd": 1.67,
+        "cvPct": 2,
+        "ci95": 1.464
+      },
+      "firstWriteIo": {
+        "dirsWalked": 39,
+        "filesStatted": 90,
+        "uniqueFilesStatted": 88,
+        "filesRead": 24,
+        "uniqueFilesRead": 15,
+        "bytesRead": 45609,
+        "filesWritten": 5,
+        "bytesWritten": 5335
+      },
+      "lastWriteIo": {
+        "dirsWalked": 39,
+        "filesStatted": 91,
+        "uniqueFilesStatted": 88,
+        "filesRead": 82,
+        "uniqueFilesRead": 44,
+        "bytesRead": 79278,
+        "filesWritten": 4,
+        "bytesWritten": 6685
+      }
+    },
+    "sessionStartCold": {
+      "latencyMs": {
+        "n": 12,
+        "min": 39.517,
+        "p50": 43.372,
+        "mean": 45.977,
+        "p95": 61.228,
+        "p99": 75.655,
+        "max": 79.262,
+        "sd": 10.679,
+        "cvPct": 23.2,
+        "ci95": 6.042
+      },
+      "cpuMs": {
+        "n": 12,
+        "min": 0,
+        "p50": 31.5,
+        "mean": 31.333,
+        "p95": 62.45,
+        "p99": 62.89,
+        "max": 63,
+        "sd": 20.973,
+        "cvPct": 66.9,
+        "ci95": 11.867
+      },
+      "ioPerOp": {
+        "dirsWalked": 8,
+        "filesStatted": 43,
+        "uniqueFilesStatted": 38,
+        "filesRead": 44,
+        "uniqueFilesRead": 39,
+        "bytesRead": 20023,
+        "filesWritten": 1,
+        "bytesWritten": 2307
+      },
+      "heapDeltaKb": 2341,
+      "tokensProduced": 525
+    },
+    "sessionStartWarm": {
+      "latencyMs": {
+        "n": 25,
+        "min": 3.095,
+        "p50": 3.333,
+        "mean": 3.545,
+        "p95": 4.462,
+        "p99": 4.506,
+        "max": 4.517,
+        "sd": 0.497,
+        "cvPct": 14,
+        "ci95": 0.195
+      },
+      "cpuMs": {
+        "n": 25,
+        "min": 0,
+        "p50": 0,
+        "mean": 2.52,
+        "p95": 16,
+        "p99": 16,
+        "max": 16,
+        "sd": 5.896,
+        "cvPct": 234,
+        "ci95": 2.311
+      },
+      "ioPerOp": {
+        "dirsWalked": 4,
+        "filesStatted": 37,
+        "uniqueFilesStatted": 37,
+        "filesRead": 2,
+        "uniqueFilesRead": 2,
+        "bytesRead": 2498,
+        "filesWritten": 0,
+        "bytesWritten": 0
+      },
+      "heapDeltaKb": 6757,
+      "tokensProduced": 525
+    },
+    "stopUnchanged": {
+      "latencyMs": {
+        "n": 12,
+        "min": 203.935,
+        "p50": 216.611,
+        "mean": 225.782,
+        "p95": 262.161,
+        "p99": 266.975,
+        "max": 268.178,
+        "sd": 21.025,
+        "cvPct": 9.3,
+        "ci95": 11.896
+      },
+      "cpuMs": {
+        "n": 12,
+        "min": 46,
+        "p50": 63,
+        "mean": 74.167,
+        "p95": 101.3,
+        "p99": 107.46,
+        "max": 109,
+        "sd": 21.349,
+        "cvPct": 28.8,
+        "ci95": 12.079
+      },
+      "ioPerOp": {
+        "dirsWalked": 66,
+        "filesStatted": 184,
+        "uniqueFilesStatted": 93,
+        "filesRead": 124,
+        "uniqueFilesRead": 43,
+        "bytesRead": 92903,
+        "filesWritten": 4,
+        "bytesWritten": 4380
+      },
+      "heapDeltaKb": 8760
+    },
+    "stopOneFileModified": {
+      "latencyMs": {
+        "n": 12,
+        "min": 219.259,
+        "p50": 243.306,
+        "mean": 252.437,
+        "p95": 308.843,
+        "p99": 329.966,
+        "max": 335.247,
+        "sd": 33.254,
+        "cvPct": 13.2,
+        "ci95": 18.815
+      },
+      "cpuMs": {
+        "n": 12,
+        "min": 62,
+        "p50": 93.5,
+        "mean": 93.75,
+        "p95": 125.45,
+        "p99": 125.89,
+        "max": 126,
+        "sd": 22.247,
+        "cvPct": 23.7,
+        "ci95": 12.587
+      },
+      "ioPerOp": {
+        "dirsWalked": 120,
+        "filesStatted": 266,
+        "uniqueFilesStatted": 93,
+        "filesRead": 130,
+        "uniqueFilesRead": 45,
+        "bytesRead": 179291,
+        "filesWritten": 5,
+        "bytesWritten": 46012
+      },
+      "heapDeltaKb": 8301
+    },
+    "stopMultiFileModified": {
+      "latencyMs": {
+        "n": 10,
+        "min": 191.342,
+        "p50": 243.989,
+        "mean": 245.669,
+        "p95": 281.332,
+        "p99": 287.263,
+        "max": 288.746,
+        "sd": 27.464,
+        "cvPct": 11.2,
+        "ci95": 17.023
+      },
+      "cpuMs": {
+        "n": 10,
+        "min": 47,
+        "p50": 86,
+        "mean": 85.9,
+        "p95": 118.25,
+        "p99": 123.65,
+        "max": 125,
+        "sd": 24.844,
+        "cvPct": 28.9,
+        "ci95": 15.398
+      },
+      "ioPerOp": {
+        "dirsWalked": 120,
+        "filesStatted": 264,
+        "uniqueFilesStatted": 93,
+        "filesRead": 133,
+        "uniqueFilesRead": 49,
+        "bytesRead": 197121,
+        "filesWritten": 5,
+        "bytesWritten": 47327
+      },
+      "heapDeltaKb": -7749
+    },
+    "stopRenameDelete": {
+      "latencyMs": {
+        "n": 10,
+        "min": 171.024,
+        "p50": 229.585,
+        "mean": 228.272,
+        "p95": 253.074,
+        "p99": 255.326,
+        "max": 255.889,
+        "sd": 23.454,
+        "cvPct": 10.3,
+        "ci95": 14.537
+      },
+      "cpuMs": {
+        "n": 10,
+        "min": 30,
+        "p50": 63,
+        "mean": 68.7,
+        "p95": 111.5,
+        "p99": 122.3,
+        "max": 125,
+        "sd": 30.122,
+        "cvPct": 43.8,
+        "ci95": 18.67
+      },
+      "ioPerOp": {
+        "dirsWalked": 120,
+        "filesStatted": 266,
+        "uniqueFilesStatted": 93,
+        "filesRead": 130,
+        "uniqueFilesRead": 46,
+        "bytesRead": 150051,
+        "filesWritten": 7,
+        "bytesWritten": 53469
+      },
+      "heapDeltaKb": -9426
+    },
+    "depChangePassport": {
+      "latencyMs": {
+        "n": 12,
+        "min": 51.059,
+        "p50": 83.273,
+        "mean": 81.374,
+        "p95": 102.005,
+        "p99": 102.641,
+        "max": 102.8,
+        "sd": 15.332,
+        "cvPct": 18.8,
+        "ci95": 8.675
+      },
+      "cpuMs": {
+        "n": 12,
+        "min": 16,
+        "p50": 39,
+        "mean": 37.75,
+        "p95": 53.75,
+        "p99": 60.35,
+        "max": 62,
+        "sd": 13.962,
+        "cvPct": 37,
+        "ci95": 7.9
+      },
+      "ioPerOp": {
+        "dirsWalked": 31,
+        "filesStatted": 90,
+        "uniqueFilesStatted": 88,
+        "filesRead": 46,
+        "uniqueFilesRead": 42,
+        "bytesRead": 59017,
+        "filesWritten": 2,
+        "bytesWritten": 4516
+      },
+      "heapDeltaKb": 1458
+    },
+    "whereCold": {
+      "latencyMs": {
+        "n": 10,
+        "min": 75.811,
+        "p50": 105.751,
+        "mean": 104.42,
+        "p95": 125.044,
+        "p99": 125.637,
+        "max": 125.785,
+        "sd": 20.072,
+        "cvPct": 19.2,
+        "ci95": 12.441
+      },
+      "cpuMs": {
+        "n": 10,
+        "min": 0,
+        "p50": 47,
+        "mean": 48.6,
+        "p95": 104.4,
+        "p99": 121.68,
+        "max": 126,
+        "sd": 37.491,
+        "cvPct": 77.1,
+        "ci95": 23.237
+      },
+      "ioPerOp": {
+        "dirsWalked": 54,
+        "filesStatted": 80,
+        "uniqueFilesStatted": 80,
+        "filesRead": 82,
+        "uniqueFilesRead": 81,
+        "bytesRead": 854550,
+        "filesWritten": 1,
+        "bytesWritten": 38115
+      },
+      "heapDeltaKb": 11886
+    },
+    "whereWarm": {
+      "latencyMs": {
+        "n": 20,
+        "min": 9.835,
+        "p50": 12.26,
+        "mean": 12.633,
+        "p95": 15.576,
+        "p99": 17.188,
+        "max": 17.591,
+        "sd": 1.856,
+        "cvPct": 14.7,
+        "ci95": 0.813
+      },
+      "cpuMs": {
+        "n": 20,
+        "min": 0,
+        "p50": 15.5,
+        "mean": 11.75,
+        "p95": 16,
+        "p99": 16,
+        "max": 16,
+        "sd": 6.973,
+        "cvPct": 59.3,
+        "ci95": 3.056
+      },
+      "ioPerOp": {
+        "dirsWalked": 54,
+        "filesStatted": 80,
+        "uniqueFilesStatted": 80,
+        "filesRead": 3,
+        "uniqueFilesRead": 2,
+        "bytesRead": 38185,
+        "filesWritten": 0,
+        "bytesWritten": 0
+      },
+      "heapDeltaKb": -23836
+    },
+    "retrievalKeywordInMem": {
+      "latencyMs": {
+        "n": 50,
+        "min": 0.177,
+        "p50": 0.244,
+        "mean": 0.274,
+        "p95": 0.46,
+        "p99": 0.558,
+        "max": 0.573,
+        "sd": 0.098,
+        "cvPct": 36,
+        "ci95": 0.027
+      },
+      "cpuMs": {
+        "n": 50,
+        "min": 0,
+        "p50": 0,
+        "mean": 0.3,
+        "p95": 0,
+        "p99": 7.65,
+        "max": 15,
+        "sd": 2.121,
+        "cvPct": 707.1,
+        "ci95": 0.588
+      },
+      "ioPerOp": {
+        "dirsWalked": 0,
+        "filesStatted": 0,
+        "uniqueFilesStatted": 0,
+        "filesRead": 0,
+        "uniqueFilesRead": 0,
+        "bytesRead": 0,
+        "filesWritten": 0,
+        "bytesWritten": 0
+      },
+      "heapDeltaKb": 7513
+    },
+    "retrievalHybridInMem": {
+      "latencyMs": {
+        "n": 50,
+        "min": 1.206,
+        "p50": 1.435,
+        "mean": 1.686,
+        "p95": 3.074,
+        "p99": 4.52,
+        "max": 4.876,
+        "sd": 0.71,
+        "cvPct": 42.1,
+        "ci95": 0.197
+      },
+      "cpuMs": {
+        "n": 50,
+        "min": 0,
+        "p50": 0,
+        "mean": 1.88,
+        "p95": 16,
+        "p99": 23.65,
+        "max": 31,
+        "sd": 6.023,
+        "cvPct": 320.3,
+        "ci95": 1.669
+      },
+      "ioPerOp": {
+        "dirsWalked": 0,
+        "filesStatted": 0,
+        "uniqueFilesStatted": 0,
+        "filesRead": 0,
+        "uniqueFilesRead": 0,
+        "bytesRead": 0,
+        "filesWritten": 0,
+        "bytesWritten": 0
+      },
+      "heapDeltaKb": -1180
+    },
+    "retrievalContextHybridDisk": {
+      "latencyMs": {
+        "n": 20,
+        "min": 36.977,
+        "p50": 48.595,
+        "mean": 51.249,
+        "p95": 79.125,
+        "p99": 89.932,
+        "max": 92.633,
+        "sd": 14.741,
+        "cvPct": 28.8,
+        "ci95": 6.461
+      },
+      "cpuMs": {
+        "n": 20,
+        "min": 0,
+        "p50": 15,
+        "mean": 16.4,
+        "p95": 34.3,
+        "p99": 69.26,
+        "max": 78,
+        "sd": 18.681,
+        "cvPct": 113.9,
+        "ci95": 8.187
+      },
+      "ioPerOp": {
+        "dirsWalked": 4,
+        "filesStatted": 6,
+        "uniqueFilesStatted": 6,
+        "filesRead": 39,
+        "uniqueFilesRead": 35,
+        "bytesRead": 15546,
+        "filesWritten": 0,
+        "bytesWritten": 0
+      },
+      "heapDeltaKb": 86
+    }
+  },
+  "retrievalEvaluation": {
+    "datasetVersion": "recall-eval-ds-v1",
+    "corpusSize": 30,
+    "distractorCount": 3,
+    "queryCount": 32,
+    "modes": {
+      "KEYWORD_ONLY": {
+        "queries": 32,
+        "recallAt1Pct": 90.6,
+        "recallAt3Pct": 96.9,
+        "recallAt5Pct": 96.9,
+        "gradedRecallAt3Pct": 88,
+        "gradedRecallAt5Pct": 92.2,
+        "precisionAt1Pct": 96.9,
+        "precisionAt3Pct": 53.1,
+        "precisionAt5Pct": 40.8,
+        "mrr": 0.938,
+        "ndcgAt3": 0.934,
+        "ndcgAt5": 0.942,
+        "unnecessaryRateAt3Pct": 46.9,
+        "distractorLeakRatePct": 12.5,
+        "avgContextTokens": 203,
+        "totalMs": 398.43,
+        "msPerQuery": 12.451,
+        "hitsAt1": 29,
+        "hitsAt3": 31,
+        "hitsAt5": 31,
+        "nonTop1": [
+          {
+            "query": "throttling incoming client traffic",
+            "category": "co-occurrence+stem",
+            "rank": 2,
+            "top1Title": "Healthcheck /readyz waits for SQLite warmup before traffic drain"
+          },
+          {
+            "query": "database locked under parallel writes",
+            "category": "morphology",
+            "rank": 2,
+            "top1Title": "Write queue uses exponential backoff with jitter on lock contention"
+          }
+        ],
+        "missesAt3": [
+          {
+            "query": "login failure",
+            "category": "co-occurrence+stem",
+            "expectedKey": "auth_jwt_401",
+            "rank": "MISS",
+            "got": [
+              "Quarantine untrusted memories failing prompt injection checks",
+              "Session cookie SameSite=Lax requirement for OAuth callback",
+              "CORS Access-Control-Allow-Origin cannot be wildcard with credentials"
+            ]
+          }
+        ]
+      },
+      "FTS5_BM25_ONLY": {
+        "queries": 32,
+        "recallAt1Pct": 90.6,
+        "recallAt3Pct": 96.9,
+        "recallAt5Pct": 96.9,
+        "gradedRecallAt3Pct": 86.5,
+        "gradedRecallAt5Pct": 95.3,
+        "precisionAt1Pct": 100,
+        "precisionAt3Pct": 51.6,
+        "precisionAt5Pct": 41.9,
+        "mrr": 0.938,
+        "ndcgAt3": 0.933,
+        "ndcgAt5": 0.946,
+        "unnecessaryRateAt3Pct": 48.4,
+        "distractorLeakRatePct": 0,
+        "avgContextTokens": 235,
+        "totalMs": 6.93,
+        "msPerQuery": 0.217,
+        "hitsAt1": 29,
+        "hitsAt3": 31,
+        "hitsAt5": 31,
+        "nonTop1": [
+          {
+            "query": "signin fails when server clock is off",
+            "category": "co-occurrence",
+            "rank": 2,
+            "top1Title": "Session cookie SameSite=Lax requirement for OAuth callback"
+          },
+          {
+            "query": "throttling incoming client traffic",
+            "category": "co-occurrence+stem",
+            "rank": 2,
+            "top1Title": "Healthcheck /readyz waits for SQLite warmup before traffic drain"
+          }
+        ],
+        "missesAt3": [
+          {
+            "query": "login failure",
+            "category": "co-occurrence+stem",
+            "expectedKey": "auth_jwt_401",
+            "rank": "MISS",
+            "got": [
+              "Session cookie SameSite=Lax requirement for OAuth callback",
+              "Quarantine untrusted memories failing prompt injection checks",
+              "CORS Access-Control-Allow-Origin cannot be wildcard with credentials"
+            ]
+          }
+        ]
+      },
+      "VECTOR_ONLY": {
+        "queries": 32,
+        "recallAt1Pct": 59.4,
+        "recallAt3Pct": 78.1,
+        "recallAt5Pct": 84.4,
+        "gradedRecallAt3Pct": 63,
+        "gradedRecallAt5Pct": 67.7,
+        "precisionAt1Pct": 62.5,
+        "precisionAt3Pct": 33.3,
+        "precisionAt5Pct": 21.4,
+        "mrr": 0.696,
+        "ndcgAt3": 0.676,
+        "ndcgAt5": 0.701,
+        "unnecessaryRateAt3Pct": 66.7,
+        "distractorLeakRatePct": 0,
+        "avgContextTokens": 275,
+        "totalMs": 14.74,
+        "msPerQuery": 0.461,
+        "hitsAt1": 19,
+        "hitsAt3": 25,
+        "hitsAt5": 27,
+        "nonTop1": [
+          {
+            "query": "oauth login loses state on redirect",
+            "category": "co-occurrence",
+            "rank": 2,
+            "top1Title": "Token bucket rate limiter uses Redis sliding window"
+          },
+          {
+            "query": "migrating database columns",
+            "category": "morphology",
+            "rank": 2,
+            "top1Title": "Rejected bundling tree-sitter WASM grammars in core package"
+          },
+          {
+            "query": "throttled API clients",
+            "category": "morphology",
+            "rank": 5,
+            "top1Title": "Rejected bundling tree-sitter WASM grammars in core package"
+          },
+          {
+            "query": "customizing component themes",
+            "category": "morphology",
+            "rank": 2,
+            "top1Title": "Windows EPERM retry on atomicWrite rename over existing file"
+          },
+          {
+            "query": "database locked under parallel writes",
+            "category": "morphology",
+            "rank": 2,
+            "top1Title": "Enforce CSS custom property tokens instead of hardcoded hex colors"
+          },
+          {
+            "query": "why is token billing so expensive when system prompt changes",
+            "category": "stopwords",
+            "rank": 2,
+            "top1Title": "TypeScript NodeNext imports require explicit .js extension"
+          },
+          {
+            "query": "how to stop untrusted input from hijacking agent instructions",
+            "category": "stopwords",
+            "rank": 4,
+            "top1Title": "Secret scanner Shannon entropy allowlist for file paths"
+          },
+          {
+            "query": "hook process hangs waiting on stdin when no pipe",
+            "category": "natural",
+            "rank": 3,
+            "top1Title": "Emit structured JSON logs to stderr during MCP and hook execution"
+          }
+        ],
+        "missesAt3": [
+          {
+            "query": "login failure",
+            "category": "co-occurrence+stem",
+            "expectedKey": "auth_jwt_401",
+            "rank": "MISS",
+            "got": [
+              "Cache regex code landmarks by file mtimeMs and size",
+              "Prune session-log.md entries older than 14 days or 50 max",
+              "Enforce CSS custom property tokens instead of hardcoded hex colors"
+            ]
+          },
+          {
+            "query": "signin fails when server clock is off",
+            "category": "co-occurrence",
+            "expectedKey": "auth_jwt_401",
+            "rank": "MISS",
+            "got": [
+              "Antigravity SessionStart hook returns injectSteps systemMessage payload",
+              "Register Claude Code hooks in .claude/settings.local.json",
+              "Quarantine untrusted memories failing prompt injection checks"
+            ]
+          },
+          {
+            "query": "throttling incoming client traffic",
+            "category": "co-occurrence+stem",
+            "expectedKey": "api_rate_limit",
+            "rank": "MISS",
+            "got": [
+              "Rejected bundling tree-sitter WASM grammars in core package",
+              "Windows EPERM retry on atomicWrite rename over existing file",
+              "Advisory lock required before running schema migration"
+            ]
+          },
+          {
+            "query": "theming variables for dark mode",
+            "category": "co-occurrence+stem",
+            "expectedKey": "ui_design_tokens",
+            "rank": "MISS",
+            "got": [
+              "General onboarding notes for how the team works with issues",
+              "SQLite WAL pragma and busy_timeout for concurrent writers",
+              "Secret scanner Shannon entropy allowlist for file paths"
+            ]
+          },
+          {
+            "query": "throttled API clients",
+            "category": "morphology",
+            "expectedKey": "api_rate_limit",
+            "rank": 5,
+            "got": [
+              "Rejected bundling tree-sitter WASM grammars in core package",
+              "Enforce CSS custom property tokens instead of hardcoded hex colors",
+              "Cache regex code landmarks by file mtimeMs and size"
+            ]
+          },
+          {
+            "query": "how to stop untrusted input from hijacking agent instructions",
+            "category": "stopwords",
+            "expectedKey": "sec_prompt_poisoning",
+            "rank": 4,
+            "got": [
+              "Secret scanner Shannon entropy allowlist for file paths",
+              "Enforce CSS custom property tokens instead of hardcoded hex colors",
+              "Prune session-log.md entries older than 14 days or 50 max"
+            ]
+          },
+          {
+            "query": "false positive entropy alert on TypeScript file path",
+            "category": "stopwords",
+            "expectedKey": "sec_secret_entropy",
+            "rank": "MISS",
+            "got": [
+              "TypeScript NodeNext imports require explicit .js extension",
+              "Enforce resolveInside check on all .recall file writes",
+              "Avoid circular import between service.ts and chat-sync.ts"
+            ]
+          }
+        ]
+      },
+      "HYBRID_MINMAX": {
+        "queries": 32,
+        "recallAt1Pct": 90.6,
+        "recallAt3Pct": 100,
+        "recallAt5Pct": 100,
+        "gradedRecallAt3Pct": 92.7,
+        "gradedRecallAt5Pct": 96.9,
+        "precisionAt1Pct": 100,
+        "precisionAt3Pct": 51.6,
+        "precisionAt5Pct": 33.4,
+        "mrr": 0.953,
+        "ndcgAt3": 0.964,
+        "ndcgAt5": 0.969,
+        "unnecessaryRateAt3Pct": 48.4,
+        "distractorLeakRatePct": 0,
+        "avgContextTokens": 208,
+        "totalMs": 374.52,
+        "msPerQuery": 11.704,
+        "hitsAt1": 29,
+        "hitsAt3": 32,
+        "hitsAt5": 32,
+        "nonTop1": [
+          {
+            "query": "login failure",
+            "category": "co-occurrence+stem",
+            "rank": 2,
+            "top1Title": "Session cookie SameSite=Lax requirement for OAuth callback"
+          },
+          {
+            "query": "throttling incoming client traffic",
+            "category": "co-occurrence+stem",
+            "rank": 2,
+            "top1Title": "Healthcheck /readyz waits for SQLite warmup before traffic drain"
+          },
+          {
+            "query": "how to stop untrusted input from hijacking agent instructions",
+            "category": "stopwords",
+            "rank": 2,
+            "top1Title": "Keep AGENTS.md static to preserve LLM prompt cache"
+          }
+        ],
+        "missesAt3": []
+      },
+      "HYBRID_RRF": {
+        "queries": 32,
+        "recallAt1Pct": 90.6,
+        "recallAt3Pct": 100,
+        "recallAt5Pct": 100,
+        "gradedRecallAt3Pct": 91.1,
+        "gradedRecallAt5Pct": 96.9,
+        "precisionAt1Pct": 100,
+        "precisionAt3Pct": 50.5,
+        "precisionAt5Pct": 33.4,
+        "mrr": 0.948,
+        "ndcgAt3": 0.953,
+        "ndcgAt5": 0.96,
+        "unnecessaryRateAt3Pct": 49.5,
+        "distractorLeakRatePct": 0,
+        "avgContextTokens": 347,
+        "totalMs": 70.45,
+        "msPerQuery": 2.202,
+        "hitsAt1": 29,
+        "hitsAt3": 32,
+        "hitsAt5": 32,
+        "nonTop1": [
+          {
+            "query": "login failure",
+            "category": "co-occurrence+stem",
+            "rank": 3,
+            "top1Title": "Session cookie SameSite=Lax requirement for OAuth callback"
+          },
+          {
+            "query": "signin fails when server clock is off",
+            "category": "co-occurrence",
+            "rank": 2,
+            "top1Title": "Session cookie SameSite=Lax requirement for OAuth callback"
+          },
+          {
+            "query": "false positive entropy alert on TypeScript file path",
+            "category": "stopwords",
+            "rank": 2,
+            "top1Title": "TypeScript NodeNext imports require explicit .js extension"
+          }
+        ],
+        "missesAt3": []
+      },
+      "HYBRID_RAW": {
+        "queries": 32,
+        "recallAt1Pct": 93.8,
+        "recallAt3Pct": 100,
+        "recallAt5Pct": 100,
+        "gradedRecallAt3Pct": 89.6,
+        "gradedRecallAt5Pct": 96.9,
+        "precisionAt1Pct": 100,
+        "precisionAt3Pct": 49.5,
+        "precisionAt5Pct": 33.4,
+        "mrr": 0.969,
+        "ndcgAt3": 0.969,
+        "ndcgAt5": 0.977,
+        "unnecessaryRateAt3Pct": 50.5,
+        "distractorLeakRatePct": 0,
+        "avgContextTokens": 205,
+        "totalMs": 63.87,
+        "msPerQuery": 1.996,
+        "hitsAt1": 30,
+        "hitsAt3": 32,
+        "hitsAt5": 32,
+        "nonTop1": [
+          {
+            "query": "login failure",
+            "category": "co-occurrence+stem",
+            "rank": 2,
+            "top1Title": "Session cookie SameSite=Lax requirement for OAuth callback"
+          },
+          {
+            "query": "how to stop untrusted input from hijacking agent instructions",
+            "category": "stopwords",
+            "rank": 2,
+            "top1Title": "Keep AGENTS.md static to preserve LLM prompt cache"
+          }
+        ],
+        "missesAt3": []
+      }
+    },
+    "endToEndContextHybridMsPerQuery": 55.15,
+    "symbolLookup": {
+      "totalTargets": 14,
+      "hitsAt1": 8,
+      "hitsAt5": 8,
+      "recallAt1Pct": 57.1,
+      "recallAt5Pct": 57.1,
+      "mrr": 0.571,
+      "missingTargets": [
+        {
+          "query": "revokeSessionSync",
+          "category": "unmodified-class-method",
+          "expected": "src/auth/token-service.ts -> revokeSessionSync",
+          "got": []
+        },
+        {
+          "query": "DEFAULT_CLOCK_TOLERANCE_SEC",
+          "category": "exported-const",
+          "expected": "src/auth/token-service.ts -> DEFAULT_CLOCK_TOLERANCE_SEC",
+          "got": []
+        },
+        {
+          "query": "commitTransactionSync",
+          "category": "unmodified-class-method",
+          "expected": "src/db/ledger-repo.ts -> commitTransactionSync",
+          "got": []
+        },
+        {
+          "query": "appendImmutableEntry",
+          "category": "exported-arrow-fn",
+          "expected": "src/db/ledger-repo.ts -> appendImmutableEntry",
+          "got": []
+        },
+        {
+          "query": "token service",
+          "category": "multi-word-query",
+          "expected": "src/auth/token-service.ts -> AuthTokenService",
+          "got": []
+        },
+        {
+          "query": "verify bearer",
+          "category": "multi-word-query",
+          "expected": "src/auth/token-service.ts -> verifyBearerToken",
+          "got": []
+        }
+      ]
+    }
+  },
+  "tokenFootprint": {
+    "alwaysOnTotal": 117,
+    "alwaysOnBudget": 120,
+    "alwaysOnPass": true,
+    "onDemandTotal": 3953,
+    "onDemandBreakdown": [
+      {
+        "source": "skill body",
+        "tokens": 389,
+        "note": "loaded when the agent picks the skill"
+      },
+      {
+        "source": ".recall/PASSPORT.md",
+        "tokens": 1023,
+        "note": "non-volatile blueprint; read once per new chat"
+      },
+      {
+        "source": "`recall context` response",
+        "tokens": 400,
+        "note": "hard cap"
+      },
+      {
+        "source": ".recall/CURRENT_STATE.md",
+        "tokens": 129,
+        "note": "read only for continue/resume"
+      },
+      {
+        "source": ".recall/PROJECT_MAP.md",
+        "tokens": 2012,
+        "note": "for humans; agents use `recall where`"
+      }
+    ],
+    "warnings": []
+  },
+  "comparison": {
+    "regressions": [],
+    "improvements": []
+  }
+}

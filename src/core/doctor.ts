@@ -4,7 +4,7 @@ import { agentState } from './agent.js';
 import { loadConfig } from './config.js';
 import { gitInfo, recallChanges } from './git.js';
 import { brokenIndexLinks, indexState } from './index-builder.js';
-import { loadAll } from './memory.js';
+import { detectStaleFileRefs, loadAll } from './memory.js';
 import { findProject } from './project.js';
 
 export interface Check {
@@ -51,13 +51,14 @@ export function runDoctor(start: string): Check[] {
   const loaded = loadAll(p.recallDir);
   if (loaded.problems.length === 0) add('memory files', true, `${loaded.memories.length} valid memories`);
   for (const pr of loaded.problems) add(`memory ${pr.file}`, false, pr.error, 'Edit the file to fix its frontmatter. Recall will not delete it.');
-  if (!loaded.staleFileRefs || loaded.staleFileRefs.length === 0) {
+  const staleFileRefs = detectStaleFileRefs(p.recallDir, loaded.memories);
+  if (staleFileRefs.length === 0) {
     add('memory file references', true, 'all referenced repo paths exist');
   } else {
     add(
       'memory file references',
       false,
-      `missing on disk: ${loaded.staleFileRefs.join(', ')}`,
+      `missing on disk: ${staleFileRefs.join(', ')}`,
       'Update or supersede memories that reference renamed/deleted files.',
     );
   }

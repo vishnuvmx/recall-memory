@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import matter from 'gray-matter';
@@ -121,13 +122,43 @@ export function loadAll(recallDir: string): LoadResult {
     else seen.set(m.id, m.file);
   }
   result.memories.sort((a, b) => a.id.localeCompare(b.id));
-  result.staleFileRefs = detectStaleFileRefs(recallDir, result.memories);
   return result;
+}
+
+/**
+ * Fast stat-only fingerprint across `.recall/` Markdown memory & rule files (zero file reads).
+ * Used to avoid re-reading and YAML-parsing unchanged Markdown files on read queries and idle hooks.
+ */
+export function computeRecallFilesStatKey(recallDir: string): string {
+  const parts: string[] = [];
+  const memMd = path.join(recallDir, 'MEMORY.md');
+  try {
+    if (fs.existsSync(memMd)) {
+      const st = fs.statSync(memMd);
+      parts.push(`M:${st.size}:${Math.floor(st.mtimeMs)}`);
+    }
+  } catch {
+    // ignore
+  }
+  for (const sub of MEMORY_DIRS) {
+    const dir = path.join(recallDir, sub);
+    try {
+      if (!fs.existsSync(dir)) continue;
+      const names = fs.readdirSync(dir).filter((n) => n.toLowerCase().endsWith('.md')).sort();
+      for (const n of names) {
+        const st = fs.statSync(path.join(dir, n));
+        parts.push(`${sub}/${n}:${st.size}:${Math.floor(st.mtimeMs)}`);
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 16);
 }
 
 const REPO_FILE_REF_RE = /(?:^|[\s`'"])((?:src|lib|app|packages|scripts|tests|test|cmd|internal)\/[A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java))(?=[\s`'":,.)]|$)/g;
 
-function detectStaleFileRefs(recallDir: string, memories: Memory[]): string[] {
+export function detectStaleFileRefs(recallDir: string, memories: Memory[]): string[] {
   const repoRoot = path.dirname(path.resolve(recallDir));
   const existingTopDirs = new Map<string, boolean>();
   const stale: string[] = [];

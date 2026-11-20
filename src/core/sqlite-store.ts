@@ -284,7 +284,6 @@ export class SqliteMemoryStore {
 
     ftsDeleteStmt.run(m.id);
     ftsInsertStmt.run(m.id, m.title, (m.tags ?? []).join(' '), m.body);
-    this.updateEmbeddingInTx(m);
   }
 
   /**
@@ -405,7 +404,7 @@ export class SqliteMemoryStore {
   /**
    * Synchronizes markdown memory records into SQLite store.
    */
-  syncFromMarkdown(memories: Memory[]): void {
+  syncFromMarkdown(memories: Memory[], filesStatKey?: string): void {
     const digest = computeMemoriesDigest(memories);
     this.db.exec('BEGIN IMMEDIATE;');
     try {
@@ -451,6 +450,9 @@ export class SqliteMemoryStore {
       }
 
       this.setMeta('sync_hash', digest);
+      if (filesStatKey) {
+        this.setMeta('files_stat_key', filesStatKey);
+      }
       this.db.exec('COMMIT;');
     } catch (err) {
       this.db.exec('ROLLBACK;');
@@ -462,9 +464,9 @@ export class SqliteMemoryStore {
    * Incrementally syncs specific changed memories when the store is already initialized,
    * avoiding a full table scan on single-memory writes.
    */
-  syncChangedMemories(changed: Memory[], allMemories?: Memory[]): void {
+  syncChangedMemories(changed: Memory[], allMemories?: Memory[], filesStatKey?: string): void {
     if (!this.getMeta('sync_hash') && allMemories) {
-      this.syncFromMarkdown(allMemories);
+      this.syncFromMarkdown(allMemories, filesStatKey);
       return;
     }
     this.db.exec('BEGIN IMMEDIATE;');
@@ -473,7 +475,32 @@ export class SqliteMemoryStore {
         this.upsertMemoryRowInTx(m);
       }
       if (allMemories) {
+        // Also reconcile any hand-edited plain docs (MEMORY.md, rules/*.md) that changed out-of-band
+        const existingDocs = this.db
+          .prepare("SELECT id, body, title FROM memories WHERE id LIKE 'doc_%';")
+          .all() as unknown as Array<{ id: string; body: string; title: string }>;
+        const existingDocMap = new Map(existingDocs.map((r) => [r.id, r]));
+        const incomingDocs = allMemories.filter((m) => m.id.startsWith('doc_'));
+        const incomingDocIds = new Set(incomingDocs.map((m) => m.id));
+
+        for (const id of existingDocMap.keys()) {
+          if (!incomingDocIds.has(id)) {
+            this.db.prepare('DELETE FROM memories WHERE id = ?;').run(id);
+            this.db.prepare('DELETE FROM memories_fts WHERE id = ?;').run(id);
+            this.db.prepare('DELETE FROM embeddings WHERE id = ?;').run(id);
+          }
+        }
+        for (const doc of incomingDocs) {
+          const prev = existingDocMap.get(doc.id);
+          if (!prev || prev.body !== doc.body || prev.title !== doc.title) {
+            this.upsertMemoryRowInTx(doc);
+          }
+        }
+
         this.setMeta('sync_hash', computeMemoriesDigest(allMemories));
+      }
+      if (filesStatKey) {
+        this.setMeta('files_stat_key', filesStatKey);
       }
       this.db.exec('COMMIT;');
     } catch (err) {
@@ -486,11 +513,16 @@ export class SqliteMemoryStore {
    * Fast O(N) digest check: syncs SQLite FTS5 & embeddings from Markdown ONLY when records changed.
    * Returns true if a sync was performed, false if already up to date.
    */
-  ensureSynced(memories: Memory[]): boolean {
+  ensureSynced(memories: Memory[], filesStatKey?: string): boolean {
     const digest = computeMemoriesDigest(memories);
     const current = this.getMeta('sync_hash');
-    if (current === digest) return false;
-    this.syncFromMarkdown(memories);
+    if (current === digest) {
+      if (filesStatKey && this.getMeta('files_stat_key') !== filesStatKey) {
+        this.setMeta('files_stat_key', filesStatKey);
+      }
+      return false;
+    }
+    this.syncFromMarkdown(memories, filesStatKey);
     return true;
   }
 

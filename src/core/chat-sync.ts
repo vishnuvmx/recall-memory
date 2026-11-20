@@ -5,19 +5,20 @@ import { syncAllAgentIntegrations } from './agent.js';
 import { recordCheckpoint } from './checkpoint.js';
 import { loadConfig } from './config.js';
 import { isMemoryExpired } from './conflict.js';
-import { repoChanges } from './git.js';
+import { gitHeadSha, hasGitDir, repoChanges } from './git.js';
 import { formatHybridHitsCompact, hybridSearch } from './hybrid-retrieval.js';
-import { indexState, rebuildIndex } from './index-builder.js';
-import { DEFAULT_IGNORED_DIRS, TEST_FILE_REGEX, createGitignoreFilter, generateProjectMap } from './mapper.js';
-import { loadSearchableMemories, type Memory } from './memory.js';
-import { PASSPORT_BLOCK_NAME, loadFingerprint, saveFingerprint, syncPassport } from './passport.js';
+import { rebuildIndex } from './index-builder.js';
+import { readCachedLandmarks, syncLandmarksIncremental, type FileLandmarks } from './landmarks.js';
+import { generateProjectMap } from './mapper.js';
+import { computeRecallFilesStatKey, loadAll, loadSearchableMemories, type Memory } from './memory.js';
+import { PASSPORT_BLOCK_NAME, computeManifestStatKey, loadFingerprint, saveFingerprint, syncPassport } from './passport.js';
 import { findProject } from './project.js';
 import { agentRemember } from './service.js';
 import { computeMemoriesDigest, getSharedSqliteStore } from './sqlite-store.js';
 import type { MemoryType, ProfileTier } from '../schemas/index.js';
 import { detectPromptInjection } from '../security/poisoning.js';
 import { findSecrets, redactSecrets } from '../security/secrets.js';
-import { atomicWrite, toPosix } from '../utils/fs.js';
+import { atomicWrite } from '../utils/fs.js';
 import { extractManagedBlock } from '../utils/managed.js';
 
 export interface ParsedChatTurn {
@@ -369,45 +370,6 @@ function summarizeChatTurn(userPrompt: string, assistantReply: string, model?: s
   return '';
 }
 
-function computeCodeTreeDigest(root: string): string {
-  const isGitignored = createGitignoreFilter(root);
-  const h = crypto.createHash('sha256');
-
-  function walk(currentDir: string, depth: number): void {
-    if (depth > 5) return;
-    let entries: fs.Dirent[] = [];
-    try {
-      entries = fs.readdirSync(currentDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const entry of entries) {
-      if (entry.name.startsWith('.') && entry.name !== '.gitignore' && entry.name !== '.env.example') {
-        if (entry.isDirectory()) continue;
-      }
-      const full = path.join(currentDir, entry.name);
-      const rel = toPosix(path.relative(root, full));
-      if (entry.isDirectory()) {
-        if (DEFAULT_IGNORED_DIRS.has(entry.name) || isGitignored(rel, true)) continue;
-        h.update(`D:${rel}\n`);
-        walk(full, depth + 1);
-      } else if (entry.isFile()) {
-        if (isGitignored(rel, false) || TEST_FILE_REGEX.test(entry.name)) continue;
-        try {
-          const st = fs.statSync(full);
-          h.update(`F:${rel}:${st.size}:${Math.floor(st.mtimeMs)}\n`);
-        } catch {
-          // ignore
-        }
-      }
-    }
-  }
-
-  walk(root, 0);
-  return h.digest('hex');
-}
-
 function humanizeModelName(raw?: string): string | undefined {
   if (!raw) return undefined;
   const trimmed = raw.trim();
@@ -417,8 +379,10 @@ function humanizeModelName(raw?: string): string | undefined {
 
 /**
  * Incremental workspace & chat synchronization engine.
- * - Updates chat session state and durable memories even on normal clean-git chats.
- * - Skips cold-run re-analysis when file & memory hashes in `.recall/.cache/fingerprint.json` match.
+ * - Stages passively extracted chat insights safely as `proposed` (never auto-promoting uncertain chat text into active rules).
+ * - Preserves task context non-destructively: idle Q&A turns with 0 modified and 0 referenced files skip overwriting CURRENT_STATE.md.
+ * - Stops regenerating PROJECT_MAP.md on every turn (only regenerated when `opts.force` is true).
+ * - Skips redundant repo walks and memory Markdown disk reads when stat fingerprints match.
  */
 export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): SyncWorkspaceReport {
   const p = findProject(start);
@@ -464,7 +428,8 @@ export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): S
 
   const insightsSaved: SyncWorkspaceReport['insightsSaved'] = [];
 
-  // 1. Extract explicit non-volatile decisions/conventions/bugfixes from chat turn locally
+  // 1. Extract explicit durable candidates from chat turn locally — ALWAYS staged as `proposed`
+  //    so uncertain regex matches never silently promote into active memory or PASSPORT.md.
   if (userPrompt || assistantReply) {
     const insights = extractDurableInsights(userPrompt, assistantReply);
     for (const item of insights) {
@@ -475,6 +440,8 @@ export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): S
           type: item.type,
           tags: item.tags,
           sources: ['local-chat-sync'],
+          status: 'proposed',
+          confidence: 0.65,
         });
         insightsSaved.push({
           id: res.memory.id,
@@ -488,76 +455,168 @@ export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): S
     }
   }
 
-  // 2. Record normal chat turn or git checkpoint (deduplicated via turnHash)
+  // 2. Non-destructive task state update:
+  //    Only update CURRENT_STATE.md when real workspace files were modified or referenced (or explicit note).
+  //    Idle Q&A turns with 0 modified and 0 referenced files perform 0 destructive overwrites!
   let chatCheckpointRecorded = false;
   const fpBefore = loadFingerprint(recallDir);
-  const modifiedFiles = (repoChanges(root) ?? []).slice(0, 20);
+  const isGitRepo = hasGitDir(root);
+  const modifiedFiles = isGitRepo ? (repoChanges(root) ?? []).slice(0, 20) : [];
+  const referencedFiles =
+    userPrompt || assistantReply
+      ? extractWorkspaceFileReferences(root, `${userPrompt}\n${assistantReply}`)
+      : [];
 
-  if (userPrompt || assistantReply) {
+  let nextChatTurnHash = fpBefore.lastChatTurnHash;
+  let nextConversationId = fpBefore.lastConversationId;
+
+  if (modifiedFiles.length > 0 || referencedFiles.length > 0 || Boolean(opts.note?.trim())) {
     const turnDigest = crypto
       .createHash('sha256')
-      .update(`${opts.conversationId ?? ''}\0${userPrompt}\0${assistantReply.slice(0, 400)}\0${modifiedFiles.join(',')}`)
+      .update(
+        `${opts.conversationId ?? ''}\0${modifiedFiles.join(',')}\0${referencedFiles.join(',')}\0${userPrompt}\0${assistantReply.slice(0, 400)}`,
+      )
       .digest('hex');
 
     if (fpBefore.lastChatTurnHash !== turnDigest) {
-      const chatSummary = summarizeChatTurn(userPrompt, assistantReply, detectedModel);
-      const referencedFiles = extractWorkspaceFileReferences(root, `${userPrompt}\n${assistantReply}`);
-      if (chatSummary) {
+      const chatSummary =
+        userPrompt || assistantReply
+          ? summarizeChatTurn(userPrompt, assistantReply, detectedModel)
+          : undefined;
+      if (chatSummary || modifiedFiles.length > 0) {
         const cp = recordCheckpoint(root, recallDir, chatSummary, {
           auto: true,
           model: detectedModel,
           referencedFiles,
+          precomputedModifiedFiles: modifiedFiles,
+          conversationId: opts.conversationId,
         });
         chatCheckpointRecorded = !cp.skipped;
-        fpBefore.lastChatTurnHash = turnDigest;
-        if (opts.conversationId) fpBefore.lastConversationId = opts.conversationId;
-        saveFingerprint(recallDir, fpBefore);
+        nextChatTurnHash = turnDigest;
+        if (opts.conversationId) nextConversationId = opts.conversationId;
       }
     }
-  } else if (modifiedFiles.length > 0) {
-    const cp = recordCheckpoint(root, recallDir, undefined, { auto: true, model: detectedModel });
-    chatCheckpointRecorded = !cp.skipped;
   }
 
-  // 3. Rebuild INDEX.md only when stale or missing
+  // 3. Memory store, INDEX.md, and SQLite sync — skipped completely when .recall/ file stats are unchanged!
+  const currentMemStatKey = computeRecallFilesStatKey(recallDir);
+  const memoriesChanged =
+    Boolean(opts.force) ||
+    insightsSaved.length > 0 ||
+    fpBefore.memoriesStatKey !== currentMemStatKey ||
+    !fs.existsSync(path.join(recallDir, 'INDEX.md'));
+
   let indexRebuilt = false;
-  if (opts.force || indexState(recallDir) !== 'up_to_date') {
-    rebuildIndex(recallDir);
-    indexRebuilt = true;
-  }
-
-  // 4. Sync SQLite FTS5 & dense vector embeddings incrementally
   let sqliteSynced = false;
-  const searchable = loadSearchableMemories(recallDir);
-  try {
-    sqliteSynced = getSharedSqliteStore(recallDir).ensureSynced(searchable);
-  } catch {
-    // Fallback cleanly when node:sqlite is unavailable (e.g., Node 20.x)
+  let searchable: Memory[] | undefined;
+  let nextMemoriesHash = fpBefore.memoriesHash;
+
+  if (memoriesChanged) {
+    const loaded = loadAll(recallDir);
+    rebuildIndex(recallDir, loaded);
+    indexRebuilt = true;
+
+    searchable = loadSearchableMemories(recallDir, loaded);
+    nextMemoriesHash = computeMemoriesDigest(searchable);
+    try {
+      sqliteSynced = getSharedSqliteStore(recallDir).ensureSynced(searchable, currentMemStatKey);
+    } catch {
+      // Fallback cleanly when node:sqlite is unavailable (e.g., Node 20.x)
+    }
   }
 
-  // 5. Incrementally sync non-volatile PASSPORT.md (0 re-analysis if structural + memory hash matches)
-  const passportRes = syncPassport(root, recallDir, { profile, force: opts.force });
+  // 4. Single-pass incremental code symbol index update:
+  //    - Clean Git repo with unchanged HEAD & valid v3 cache -> 0 directory walks, 0 stats!
+  //    - Dirty Git repo with unchanged HEAD & valid v3 cache -> update ONLY the modified files (0 directory walks)!
+  //    - Non-git repo or cold cache -> 1 single incremental pass (down from 4 walks!).
+  const currentGitHead = isGitRepo ? (gitHeadSha(root) ?? undefined) : undefined;
+  const cachedCodeFiles = !opts.force ? readCachedLandmarks(recallDir, 1, Number.POSITIVE_INFINITY, 16) : null;
 
-  // 6. Incrementally sync PROJECT_MAP.md only when code tree mtimes/sizes changed
-  const fpAfter = loadFingerprint(recallDir);
-  const currentMapHash = `${profile}:${computeCodeTreeDigest(root)}`;
-  const mapFile = path.join(recallDir, 'PROJECT_MAP.md');
+  let exportedSurfaceChanged = false;
+  let preloadedCodeFiles: FileLandmarks[] | undefined;
+
+  if (isGitRepo && cachedCodeFiles && currentGitHead && fpBefore.gitHead === currentGitHead && !opts.force) {
+    if (modifiedFiles.length === 0) {
+      // Zero code changes in clean git workspace!
+      preloadedCodeFiles = cachedCodeFiles;
+      exportedSurfaceChanged = false;
+    } else {
+      const inc = syncLandmarksIncremental(root, recallDir, {
+        changedFiles: modifiedFiles,
+        minLines: 1,
+        maxFiles: Number.POSITIVE_INFINITY,
+        maxSymbols: 16,
+      });
+      preloadedCodeFiles = inc.files;
+      exportedSurfaceChanged = inc.exportedSurfaceChanged;
+    }
+  } else {
+    const inc = syncLandmarksIncremental(root, recallDir, {
+      minLines: 1,
+      maxFiles: Number.POSITIVE_INFINITY,
+      maxSymbols: 16,
+    });
+    preloadedCodeFiles = inc.files;
+    exportedSurfaceChanged = inc.exportedSurfaceChanged;
+  }
+
+  // 5. Incrementally sync non-volatile PASSPORT.md ONLY when exports, manifests, or memories changed
+  const currentManifestStatKey = computeManifestStatKey(root);
+  const passportFile = path.join(recallDir, 'PASSPORT.md');
+  const needsPassportCheck =
+    Boolean(opts.force) ||
+    exportedSurfaceChanged ||
+    memoriesChanged ||
+    fpBefore.manifestStatKey !== currentManifestStatKey ||
+    !fs.existsSync(passportFile);
+
+  let passportUpdated = false;
+  let nextPassportHash = fpBefore.passportHash;
+
+  if (needsPassportCheck) {
+    const passMemories = searchable ?? loadSearchableMemories(recallDir);
+    const passportRes = syncPassport(root, recallDir, {
+      profile,
+      force: opts.force,
+      memories: passMemories,
+      preloadedFiles: preloadedCodeFiles,
+    });
+    passportUpdated = passportRes.updated;
+    nextPassportHash = passportRes.passportHash;
+    nextMemoriesHash = computeMemoriesDigest(passMemories);
+  }
+
+  // 6. Do NOT regenerate PROJECT_MAP.md on every turn (only when `opts.force` is explicitly requested)
   let mapUpdated = false;
-  if (opts.force || fpAfter.mapHash !== currentMapHash || !fs.existsSync(mapFile)) {
-    generateProjectMap(root, recallDir, profile);
+  if (opts.force) {
+    generateProjectMap(root, recallDir, profile, preloadedCodeFiles);
     mapUpdated = true;
   }
 
-  saveFingerprint(recallDir, {
-    ...fpAfter,
-    passportHash: passportRes.passportHash,
-    mapHash: currentMapHash,
-    memoriesHash: computeMemoriesDigest(searchable),
-    lastChatTurnHash: fpBefore.lastChatTurnHash ?? fpAfter.lastChatTurnHash,
-    lastConversationId: fpBefore.lastConversationId ?? fpAfter.lastConversationId,
-  });
+  // 7. Persist fingerprint ONLY when at least one tracked key changed (0 disk writes on unchanged idle turns!)
+  const fpChanged =
+    fpBefore.passportHash !== nextPassportHash ||
+    fpBefore.memoriesHash !== nextMemoriesHash ||
+    fpBefore.memoriesStatKey !== currentMemStatKey ||
+    fpBefore.manifestStatKey !== currentManifestStatKey ||
+    fpBefore.gitHead !== currentGitHead ||
+    fpBefore.lastChatTurnHash !== nextChatTurnHash ||
+    fpBefore.lastConversationId !== nextConversationId;
 
-  // 7. Optional multi-agent instruction & hook synchronization
+  if (fpChanged) {
+    saveFingerprint(recallDir, {
+      ...fpBefore,
+      passportHash: nextPassportHash,
+      memoriesHash: nextMemoriesHash,
+      memoriesStatKey: currentMemStatKey,
+      manifestStatKey: currentManifestStatKey,
+      gitHead: currentGitHead,
+      lastChatTurnHash: nextChatTurnHash,
+      lastConversationId: nextConversationId,
+    });
+  }
+
+  // 8. Optional multi-agent instruction & hook synchronization
   let agentsSynced: string[] | undefined;
   if (opts.allAgents) {
     agentsSynced = syncAllAgentIntegrations(root, { createMissing: true });
@@ -565,7 +624,7 @@ export function syncWorkspace(start: string, opts: SyncWorkspaceOptions = {}): S
 
   return {
     root,
-    passportUpdated: passportRes.updated,
+    passportUpdated,
     mapUpdated,
     indexRebuilt,
     sqliteSynced,
@@ -622,16 +681,20 @@ export async function readStdinNonBlocking(timeoutMs = 150): Promise<string> {
 }
 
 export interface HookPayload {
-  // Antigravity fields
+  // Antigravity fields (camelCase protojson contract)
   conversationId?: string;
   workspacePaths?: string[];
   transcriptPath?: string;
+  artifactDirectoryPath?: string;
   modelName?: string;
   lastUserInput?: string;
+  hookEventName?: string;
   terminationReason?: string;
   executionNum?: number;
+  fullyIdle?: boolean;
+  continuationActive?: boolean;
 
-  // Claude Code / Cursor / Windsurf fields
+  // Claude Code / Cursor / Windsurf fields (snake_case contract)
   session_id?: string;
   conversation_id?: string;
   workspace_roots?: string[];
@@ -647,6 +710,49 @@ export interface InjectionOptions {
   query?: string;
   maxTokens?: number;
   maxChars?: number;
+}
+
+function summarizeUnsyncedMemories(memories: Memory[], existingPassportText: string): string[] {
+  const lowerPassport = existingPassportText.toLowerCase();
+  const lines: string[] = [];
+
+  for (const m of memories) {
+    if (m.id.startsWith('doc_')) {
+      for (const rawLine of m.body.split(/\r?\n/)) {
+        const trimmed = rawLine.trim();
+        const match = /^(?:[-*]|\d+\.)\s+(.+)$/.exec(trimmed);
+        if (!match?.[1]) continue;
+        const bullet = match[1].trim();
+        if (!bullet || bullet.startsWith('(Add ') || bullet.includes('[INDEX.md]')) continue;
+        if (detectPromptInjection(bullet).isPoisoned || findSecrets(bullet).length > 0) continue;
+        const snippet = bullet.slice(0, 48).toLowerCase();
+        if (!lowerPassport.includes(snippet)) {
+          lines.push(`- ${bullet.length > 160 ? `${bullet.slice(0, 157)}...` : bullet}`);
+        }
+      }
+      continue;
+    }
+
+    if (existingPassportText.includes(`(${m.id})`) || lowerPassport.includes(m.title.trim().toLowerCase())) {
+      continue;
+    }
+    const firstBodyLine =
+      m.body
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .find((l) => l && !l.startsWith('#') && !l.startsWith('---')) ?? '';
+    const cleanBody = firstBodyLine.replace(/^[-*]\s+/, '').replace(/\s+/g, ' ').trim();
+    const shortBody = cleanBody.length > 140 ? `${cleanBody.slice(0, 137)}...` : cleanBody;
+    const summary =
+      shortBody && shortBody.toLowerCase() !== m.title.toLowerCase()
+        ? `- **[${m.type}] ${m.title}**: ${shortBody} _(${m.id})_`
+        : `- **[${m.type}] ${m.title}** _(${m.id})_`;
+    if (!detectPromptInjection(summary).isPoisoned && findSecrets(summary).length === 0) {
+      lines.push(summary);
+    }
+  }
+
+  return lines.slice(0, 10);
 }
 
 /**
@@ -671,7 +777,8 @@ export function buildSanitizedInjectionContext(start: string, opts: InjectionOpt
   try {
     const pStat = fs.existsSync(passportPath) ? fs.statSync(passportPath) : undefined;
     const csStat = fs.existsSync(currentStatePath) ? fs.statSync(currentStatePath) : undefined;
-    passportStatKey = `${pStat ? `${pStat.size}:${Math.floor(pStat.mtimeMs)}` : 'no-p'}|${csStat ? `${csStat.size}:${Math.floor(csStat.mtimeMs)}` : 'no-cs'}`;
+    const filesKey = computeRecallFilesStatKey(recallDir);
+    passportStatKey = `${pStat ? `${pStat.size}:${Math.floor(pStat.mtimeMs)}` : 'no-p'}|${csStat ? `${csStat.size}:${Math.floor(csStat.mtimeMs)}` : 'no-cs'}|${filesKey}`;
   } catch {
     passportStatKey = 'err';
   }
@@ -739,6 +846,7 @@ export function buildSanitizedInjectionContext(start: string, opts: InjectionOpt
   }
 
   const sections: string[] = [];
+  let cleanedPassport = '';
 
   // 1. Read existing PASSPORT.md without triggering cold regeneration, sanitizing each line
   if (fs.existsSync(passportPath)) {
@@ -754,12 +862,20 @@ export function buildSanitizedInjectionContext(start: string, opts: InjectionOpt
         }
         return true;
       });
-      const cleanedPassport = safeLines.join('\n').trim();
+      cleanedPassport = safeLines.join('\n').trim();
       if (cleanedPassport) {
         sections.push(cleanedPassport);
       }
     } catch {
       // ignore unreadable passport
+    }
+  }
+
+  // 1a. Include any active rules/memories that were added or hand-edited without running manual CLI rebuilds
+  if (cleanedPassport && safeActiveMemories.length > 0) {
+    const unsyncedLines = summarizeUnsyncedMemories(safeActiveMemories, cleanedPassport);
+    if (unsyncedLines.length > 0) {
+      sections.push('', '## Active Project Rules & Memories', ...unsyncedLines);
     }
   }
 
@@ -788,11 +904,12 @@ export function buildSanitizedInjectionContext(start: string, opts: InjectionOpt
     }
   }
 
-  // 2. If a prompt query is provided (e.g. UserPromptSubmit), append top sanitized hybrid matches
+  // 2. If a prompt query is provided (e.g. SessionStart lastUserInput or UserPromptSubmit), append top sanitized hybrid matches
   if (queryClean && safeActiveMemories.length > 0) {
     let store;
     try {
       store = getSharedSqliteStore(recallDir);
+      store.ensureSynced(safeActiveMemories);
     } catch {
       store = undefined;
     }
@@ -842,32 +959,70 @@ export function buildSanitizedInjectionContext(start: string, opts: InjectionOpt
  * Never throws; always returns valid hook JSON for the calling agent runtime.
  */
 export function processLifecycleHookInput(rawStdin: string, fallbackCwd = process.cwd()): string {
-  let payload: HookPayload = {};
-  let plainNote = '';
-  const trimmed = rawStdin.trim();
-
-  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-    try {
-      payload = JSON.parse(trimmed) as HookPayload;
-    } catch {
-      plainNote = trimmed;
-    }
-  } else if (trimmed) {
-    plainNote = trimmed;
+  const trimmed = typeof rawStdin === 'string' ? rawStdin.trim() : '';
+  if (!trimmed || !trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+    return '{}';
   }
 
-  const startDir =
-    payload.workspacePaths?.[0] ||
-    payload.workspace_roots?.[0] ||
-    payload.cwd ||
-    fallbackCwd;
+  let parsedUnknown: unknown;
+  try {
+    parsedUnknown = JSON.parse(trimmed);
+  } catch {
+    return '{}';
+  }
+  if (!parsedUnknown || typeof parsedUnknown !== 'object' || Array.isArray(parsedUnknown)) {
+    return '{}';
+  }
 
-  const eventName = payload.hook_event_name || '';
-  if (eventName === 'SessionStart' || eventName === 'UserPromptSubmit') {
+  const payload = parsedUnknown as HookPayload;
+
+  const wsPath =
+    Array.isArray(payload.workspacePaths) && typeof payload.workspacePaths[0] === 'string' && payload.workspacePaths[0].trim()
+      ? payload.workspacePaths[0]
+      : undefined;
+  const wsRoot =
+    Array.isArray(payload.workspace_roots) && typeof payload.workspace_roots[0] === 'string' && payload.workspace_roots[0].trim()
+      ? payload.workspace_roots[0]
+      : undefined;
+  const cwdPath = typeof payload.cwd === 'string' && payload.cwd.trim() ? payload.cwd : undefined;
+  const startDir = wsPath || wsRoot || cwdPath || fallbackCwd;
+
+  const agyEventName = typeof payload.hookEventName === 'string' ? payload.hookEventName.trim() : '';
+  const claudeEventName = typeof payload.hook_event_name === 'string' ? payload.hook_event_name.trim() : '';
+  const eventName = agyEventName || claudeEventName;
+
+  const isAntigravity =
+    Boolean(agyEventName) ||
+    (!claudeEventName &&
+      (Array.isArray(payload.workspacePaths) ||
+        typeof payload.conversationId === 'string' ||
+        typeof payload.artifactDirectoryPath === 'string' ||
+        typeof payload.terminationReason === 'string' ||
+        typeof payload.executionNum === 'number'));
+
+  if (eventName === 'SessionStart' || eventName === 'UserPromptSubmit' || eventName === 'PreInvocation') {
     try {
-      const query = eventName === 'UserPromptSubmit' ? (payload.prompt || payload.lastUserInput) : undefined;
+      const query =
+        typeof payload.prompt === 'string' && payload.prompt.trim()
+          ? payload.prompt
+          : typeof payload.lastUserInput === 'string' && payload.lastUserInput.trim()
+            ? payload.lastUserInput
+            : undefined;
       const additionalContext = buildSanitizedInjectionContext(startDir, { query });
       if (!additionalContext) return '{}';
+
+      if (isAntigravity && (eventName === 'SessionStart' || eventName === 'PreInvocation')) {
+        return JSON.stringify({
+          injectSteps: [
+            {
+              systemMessage: {
+                systemMessage: additionalContext,
+              },
+            },
+          ],
+        });
+      }
+
       return JSON.stringify({
         hookSpecificOutput: {
           hookEventName: eventName,
@@ -880,16 +1035,39 @@ export function processLifecycleHookInput(rawStdin: string, fallbackCwd = proces
   }
 
   const isAntigravityStop =
-    typeof payload.terminationReason === 'string' || typeof payload.executionNum === 'number';
+    (isAntigravity && eventName === 'Stop') ||
+    typeof payload.terminationReason === 'string' ||
+    typeof payload.executionNum === 'number';
+
+  const hasSyncableSignal =
+    eventName === 'Stop' ||
+    isAntigravityStop ||
+    typeof payload.transcriptPath === 'string' ||
+    typeof payload.transcript_path === 'string' ||
+    typeof payload.lastUserInput === 'string' ||
+    typeof payload.prompt === 'string' ||
+    typeof payload.response === 'string';
+
+  if (!hasSyncableSignal) {
+    return '{}';
+  }
 
   try {
     syncWorkspace(startDir, {
-      transcriptPath: payload.transcriptPath || payload.transcript_path,
-      userPrompt: payload.lastUserInput || payload.prompt,
-      assistantReply: payload.response,
-      note: plainNote || undefined,
-      model: payload.modelName || payload.model,
-      conversationId: payload.conversationId || payload.session_id || payload.conversation_id,
+      transcriptPath:
+        (typeof payload.transcriptPath === 'string' ? payload.transcriptPath : undefined) ||
+        (typeof payload.transcript_path === 'string' ? payload.transcript_path : undefined),
+      userPrompt:
+        (typeof payload.lastUserInput === 'string' ? payload.lastUserInput : undefined) ||
+        (typeof payload.prompt === 'string' ? payload.prompt : undefined),
+      assistantReply: typeof payload.response === 'string' ? payload.response : undefined,
+      model:
+        (typeof payload.modelName === 'string' ? payload.modelName : undefined) ||
+        (typeof payload.model === 'string' ? payload.model : undefined),
+      conversationId:
+        (typeof payload.conversationId === 'string' ? payload.conversationId : undefined) ||
+        (typeof payload.session_id === 'string' ? payload.session_id : undefined) ||
+        (typeof payload.conversation_id === 'string' ? payload.conversation_id : undefined),
     });
   } catch {
     // Bookkeeping must never break an AI agent's execution loop

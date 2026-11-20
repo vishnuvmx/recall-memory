@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {
   agentRemember,
+  approve,
   buildSanitizedInjectionContext,
   closeSharedSqliteStore,
   context,
   costReport,
+  getProposals,
   initProject,
   passport,
   processLifecycleHookInput,
@@ -18,6 +21,7 @@ import {
   syncWorkspace,
   whereIs,
 } from '../dist/index.js';
+import { HOOK_COMMAND, HOOK_NAME, resolveRecallCliPath } from '../dist/core/agent.js';
 
 function makeTempProject(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'recall-test-'));
@@ -165,13 +169,38 @@ test('Normal chat lifecycle hooks (Antigravity & Claude Code) update CURRENT_STA
     assert.match(stateMd, /How should we handle caching/);
     assert.match(stateMd, /src\/engine\.ts/);
 
-    // Verify durable decision was automatically extracted into .recall/decisions/ and PASSPORT.md!
-    const memHits = context(dir, 'Cache symbol landmarks mtime');
-    assert.ok(memHits.length > 0);
+    // Verify durable decision was extracted safely as `proposed` (never silently promoted to active/PASSPORT.md!)
+    const activeBeforeApproval = context(dir, 'Cache symbol landmarks mtime');
+    assert.equal(activeBeforeApproval.length, 0, 'Passively extracted chat insights must NOT auto-promote to active memory');
+    const passportBeforeApproval = fs.readFileSync(path.join(dir, '.recall', 'PASSPORT.md'), 'utf8');
+    assert.doesNotMatch(passportBeforeApproval, /Cache symbol landmarks/);
+
+    const proposals = getProposals(dir);
+    assert.ok(proposals.some((m) => /Cache symbol landmarks/i.test(m.title)), 'Expected extracted decision in pending proposals');
+    const decProp = proposals.find((m) => /Cache symbol landmarks/i.test(m.title));
+    approve(dir, decProp.id);
+
+    const memHitsAfterApproval = context(dir, 'Cache symbol landmarks mtime');
+    assert.ok(memHitsAfterApproval.length > 0);
     const passportMd = fs.readFileSync(path.join(dir, '.recall', 'PASSPORT.md'), 'utf8');
     assert.match(passportMd, /Cache symbol landmarks/);
 
-    // Claude Code hook format returns `{}`
+    // Non-destructive CURRENT_STATE.md: follow-up Q&A turn referencing NO files must preserve previous activeFileMap!
+    const stateBeforeIdle = fs.readFileSync(path.join(dir, '.recall', 'CURRENT_STATE.md'), 'utf8');
+    processLifecycleHookInput(
+      JSON.stringify({
+        conversationId: 'conv-123',
+        workspacePaths: [dir],
+        hookEventName: 'Stop',
+        lastUserInput: 'Thanks, that makes sense!',
+        response: 'Glad I could help!',
+      }),
+      dir,
+    );
+    const stateAfterIdle = fs.readFileSync(path.join(dir, '.recall', 'CURRENT_STATE.md'), 'utf8');
+    assert.equal(stateAfterIdle, stateBeforeIdle, 'Idle Q&A turn must NOT destructively overwrite CURRENT_STATE.md');
+
+    // Claude Code hook format returns `{}` and stages extracted conventions as `proposed`
     const claudeOut = processLifecycleHookInput(
       JSON.stringify({
         session_id: 'claude-456',
@@ -183,13 +212,13 @@ test('Normal chat lifecycle hooks (Antigravity & Claude Code) update CURRENT_STA
     );
     assert.equal(claudeOut, '{}');
 
-    const convHits = context(dir, 'validate frontmatter Zod schemas');
-    assert.ok(convHits.length > 0);
+    const convProposedHits = context(dir, 'validate frontmatter Zod schemas', { includeProposed: true });
+    assert.ok(convProposedHits.length > 0);
+    assert.equal(convProposedHits[0].memory.status, 'proposed');
 
-    // Deleted files are evicted from landmarks cache
+    // Deleted files are evicted lazily on warm whereIs() even without forcing a full sync
     assert.ok(whereIs(dir, 'runEngine').length > 0);
     fs.rmSync(path.join(dir, 'src', 'engine.ts'));
-    syncWorkspace(dir, { force: true });
     assert.equal(whereIs(dir, 'runEngine').length, 0);
   });
 });
@@ -370,5 +399,301 @@ test('v0.4.0: Sanitized SessionStart injection, corpus co-occurrence expansion, 
     assert.match(fileRefCheck.detail, /src\/deleted-validator\.ts/);
   });
 });
+
+test('Native Antigravity Session Integration: SessionStart/Stop hooks, protocol formats, .agents/ CWD execution, missing binary fallback, and fresh-session delivery', () => {
+  makeTempProject((dir) => {
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({
+        name: 'agy-native-app',
+        description: 'Zero-command Antigravity session integration test project.',
+        type: 'module',
+        scripts: { build: 'tsc', test: 'node --test' },
+      }),
+    );
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'src', 'router.ts'),
+      'export function routeRequest(pathStr: string): string {\n  return pathStr.trim();\n}\n',
+    );
+
+    // Initialize project WITHOUT --all-agents (default `recall init` path)
+    initProject(dir);
+
+    // Requirement 1: Verify .agents/hooks.json registers BOTH SessionStart and Stop
+    const hooksJsonPath = path.join(dir, '.agents', 'hooks.json');
+    assert.equal(fs.existsSync(hooksJsonPath), true);
+    const hooksConfig = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf8'));
+    const recallHook = hooksConfig[HOOK_NAME];
+    assert.ok(recallHook, `Expected ${HOOK_NAME} in .agents/hooks.json`);
+    assert.ok(Array.isArray(recallHook.SessionStart) && recallHook.SessionStart.length === 1);
+    assert.ok(Array.isArray(recallHook.Stop) && recallHook.Stop.length === 1);
+    assert.equal(recallHook.SessionStart[0].command, HOOK_COMMAND);
+    assert.equal(recallHook.Stop[0].command, HOOK_COMMAND);
+
+    // Verify costReport produces 0 warnings with the updated hook configuration
+    const cost = costReport(dir);
+    assert.deepEqual(cost.warnings, []);
+
+    // Seed an active memory and a proposed memory
+    agentRemember(dir, {
+      title: 'Strict idempotency key header on mutations',
+      type: 'convention',
+      tags: ['api', 'idempotency', 'headers'],
+      text: 'Require X-Idempotency-Key on all POST and PATCH endpoints in src/router.ts.',
+    });
+    propose(dir, {
+      title: 'Draft unapproved rate limit change',
+      type: 'decision',
+      tags: ['api'],
+      text: 'DRAFT_PROPOSED_DO_NOT_INJECT',
+    });
+
+    // TEST 1: Antigravity SessionStart camelCase payload -> injectSteps/systemMessage format
+    const agyStartOut = processLifecycleHookInput(
+      JSON.stringify({
+        conversationId: 'agy-conv-101',
+        workspacePaths: [dir],
+        hookEventName: 'SessionStart',
+        modelName: 'auto',
+        cwd: dir,
+      }),
+      dir,
+    );
+    const agyStartJson = JSON.parse(agyStartOut);
+    assert.ok(Array.isArray(agyStartJson.injectSteps), 'Expected Antigravity injectSteps array');
+    assert.equal(agyStartJson.injectSteps.length, 1);
+    const agySysMsg = agyStartJson.injectSteps[0]?.systemMessage?.systemMessage ?? '';
+    assert.match(agySysMsg, /agy-native-app/);
+    assert.match(agySysMsg, /Strict idempotency key header on mutations/);
+    assert.doesNotMatch(agySysMsg, /DRAFT_PROPOSED_DO_NOT_INJECT/);
+    assert.equal(agyStartJson.hookSpecificOutput, undefined);
+
+    // TEST 2: Claude Code SessionStart snake_case payload -> hookSpecificOutput format preserved
+    const claudeStartOut = processLifecycleHookInput(
+      JSON.stringify({
+        session_id: 'claude-sess-202',
+        cwd: dir,
+        hook_event_name: 'SessionStart',
+      }),
+      dir,
+    );
+    const claudeStartJson = JSON.parse(claudeStartOut);
+    assert.equal(claudeStartJson?.hookSpecificOutput?.hookEventName, 'SessionStart');
+    assert.match(claudeStartJson?.hookSpecificOutput?.additionalContext ?? '', /Strict idempotency key header on mutations/);
+    assert.doesNotMatch(claudeStartJson?.hookSpecificOutput?.additionalContext ?? '', /DRAFT_PROPOSED_DO_NOT_INJECT/);
+    assert.equal(claudeStartJson.injectSteps, undefined);
+
+    // TEST 3: Antigravity Stop event (both with hookEventName: 'Stop' and with terminationReason)
+    const agyStopOut = processLifecycleHookInput(
+      JSON.stringify({
+        conversationId: 'agy-conv-101',
+        workspacePaths: [dir],
+        hookEventName: 'Stop',
+        lastUserInput: 'We updated src/router.ts request routing.',
+        response: 'Completed routing update in src/router.ts.',
+        modelName: 'Gemini 2.5 Pro',
+      }),
+      dir,
+    );
+    assert.deepEqual(JSON.parse(agyStopOut), { decision: 'stop' });
+    const currentStateAfterStop = fs.readFileSync(path.join(dir, '.recall', 'CURRENT_STATE.md'), 'utf8');
+    assert.match(currentStateAfterStop, /Gemini 2\.5 Pro/);
+    assert.match(currentStateAfterStop, /`src\/router\.ts`/);
+    assert.match(currentStateAfterStop, /`routeRequest` \(:1\)/);
+
+    // TEST 7: Fresh-session context delivery WITHOUT running manual Recall CLI commands
+    // Simulate a user hand-editing .recall/MEMORY.md and .recall/rules/architecture.md directly on disk
+    fs.writeFileSync(
+      path.join(dir, '.recall', 'MEMORY.md'),
+      '# Project Memory\n\n## Critical constraints\n- Never block the event loop with synchronous crypto in request handlers.\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(dir, '.recall', 'rules', 'architecture.md'),
+      '# Architecture rules\n\n- Keep all route handlers pure and stateless inside `src/router.ts`.\n',
+      'utf8',
+    );
+
+    const freshSessionOut = processLifecycleHookInput(
+      JSON.stringify({
+        conversationId: 'agy-conv-fresh-102',
+        workspacePaths: [dir],
+        hookEventName: 'SessionStart',
+        lastUserInput: 'Check idempotency headers in router',
+      }),
+      dir,
+    );
+    const freshSessionMsg = JSON.parse(freshSessionOut)?.injectSteps?.[0]?.systemMessage?.systemMessage ?? '';
+    assert.match(
+      freshSessionMsg,
+      /Never block the event loop with synchronous crypto/,
+      'Expected hand-edited MEMORY.md rule to be delivered automatically in fresh session without manual CLI rebuild',
+    );
+    assert.match(
+      freshSessionMsg,
+      /Keep all route handlers pure and stateless/,
+      'Expected hand-edited rules/architecture.md rule to be delivered automatically in fresh session',
+    );
+    assert.match(
+      freshSessionMsg,
+      /## Active Working Files & Symbol Map \(Skip File Discovery\)/,
+      'Expected active file symbol map from previous turn to be delivered in fresh session',
+    );
+    assert.match(
+      freshSessionMsg,
+      /## Relevant Active Memory/,
+      'Expected relevant memories matching lastUserInput on SessionStart',
+    );
+
+    // TEST 5: Hook execution as a real shell subprocess from `.agents/` working directory
+    const agentsCwd = path.join(dir, '.agents');
+    const resolvedCli = resolveRecallCliPath(agentsCwd, { allowGlobalPath: false });
+    assert.ok(resolvedCli && fs.existsSync(resolvedCli), `Expected resolveRecallCliPath from .agents/ to find CLI, got ${resolvedCli}`);
+
+    const sessionStartCmd = recallHook.SessionStart[0].command;
+    const subprocStart = spawnSync(sessionStartCmd, {
+      cwd: agentsCwd,
+      shell: true,
+      input: JSON.stringify({
+        conversationId: 'agy-subproc-1',
+        hookEventName: 'SessionStart',
+      }),
+      encoding: 'utf8',
+      timeout: 10000,
+    });
+    assert.equal(subprocStart.status, 0, `Expected hook command from .agents/ to exit 0, stderr: ${subprocStart.stderr}`);
+    const subprocStartJson = JSON.parse(subprocStart.stdout.trim());
+    assert.ok(Array.isArray(subprocStartJson.injectSteps), 'Expected subprocess SessionStart from .agents/ to output injectSteps');
+    assert.match(subprocStartJson.injectSteps[0].systemMessage.systemMessage, /agy-native-app/);
+    assert.match(subprocStartJson.injectSteps[0].systemMessage.systemMessage, /Strict idempotency key header on mutations/);
+
+    const subprocStop = spawnSync(recallHook.Stop[0].command, {
+      cwd: agentsCwd,
+      shell: true,
+      input: JSON.stringify({
+        conversationId: 'agy-subproc-1',
+        hookEventName: 'Stop',
+        terminationReason: 'NO_TOOL_CALL',
+      }),
+      encoding: 'utf8',
+      timeout: 10000,
+    });
+    assert.equal(subprocStop.status, 0);
+    assert.deepEqual(JSON.parse(subprocStop.stdout.trim()), { decision: 'stop' });
+
+    // TEST 4: Missing Recall executable (graceful no-crash fallback from .agents/ CWD)
+    const missingResolved = resolveRecallCliPath(agentsCwd, {
+      cliPathOverride: path.join(dir, 'nonexistent-recall-cli.js'),
+      allowGlobalPath: false,
+    });
+    assert.equal(missingResolved, null);
+
+    const subprocMissing = spawnSync(sessionStartCmd, {
+      cwd: agentsCwd,
+      shell: true,
+      env: {
+        ...process.env,
+        RECALL_CLI_PATH: path.join(dir, 'nonexistent-recall-cli.js'),
+      },
+      input: JSON.stringify({
+        conversationId: 'agy-missing-bin',
+        hookEventName: 'SessionStart',
+      }),
+      encoding: 'utf8',
+      timeout: 10000,
+    });
+    assert.equal(subprocMissing.status, 0, 'Missing executable must exit 0 so the agent loop never crashes');
+    assert.deepEqual(JSON.parse(subprocMissing.stdout.trim()), {});
+
+    // TEST 6: Empty or malformed input (never throws, returns '{}', never corrupts CURRENT_STATE.md)
+    const stateBeforeMalformed = fs.readFileSync(path.join(dir, '.recall', 'CURRENT_STATE.md'), 'utf8');
+    const malformedInputs = [
+      '',
+      '   \n\t  ',
+      '{ malformed json',
+      '{"hookEventName": "SessionStart", broken}',
+      'plain random text not json',
+      'null',
+      '[]',
+      '12345',
+      '{}',
+      JSON.stringify({ workspacePaths: 12345, hookEventName: null, cwd: false }),
+    ];
+    for (const badInput of malformedInputs) {
+      const out = processLifecycleHookInput(badInput, dir);
+      assert.equal(out, '{}', `Expected '{}' for malformed/empty input ${JSON.stringify(badInput)}, got ${out}`);
+    }
+    const stateAfterMalformed = fs.readFileSync(path.join(dir, '.recall', 'CURRENT_STATE.md'), 'utf8');
+    assert.equal(
+      stateAfterMalformed,
+      stateBeforeMalformed,
+      'Empty or malformed hook input must never overwrite or corrupt CURRENT_STATE.md',
+    );
+  });
+});
+
+test('Stage 3: Incremental symbol extraction (class methods, typed arrows, consts, multi-word), gitignore hygiene, and expired keyword filtering', () => {
+  makeTempProject((dir) => {
+    fs.mkdirSync(path.join(dir, 'src', 'auth'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'src', 'auth', 'token-service.ts'),
+      [
+        'export const DEFAULT_CLOCK_TOLERANCE_SEC = 60;',
+        'export const appendImmutableEntry = async (id: string): Promise<boolean> => Boolean(id);',
+        'export class AuthTokenService {',
+        '  revokeSessionSync(sessionId: string): boolean {',
+        '    return sessionId.length > 0;',
+        '  }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+
+    initProject(dir);
+
+    // 1. Verify .recall/.gitignore ignores CURRENT_STATE.md and sessions/ by default
+    const gitignore = fs.readFileSync(path.join(dir, '.recall', '.gitignore'), 'utf8');
+    assert.match(gitignore, /^CURRENT_STATE\.md$/m);
+    assert.match(gitignore, /^sessions\/$/m);
+
+    // 2. Verify previously missed symbol types and multi-word queries resolve on warm cache
+    assert.equal(whereIs(dir, 'revokeSessionSync')[0]?.line, 4);
+    assert.equal(whereIs(dir, 'DEFAULT_CLOCK_TOLERANCE_SEC')[0]?.line, 1);
+    assert.equal(whereIs(dir, 'appendImmutableEntry')[0]?.line, 2);
+    assert.equal(whereIs(dir, 'token service')[0]?.name, 'AuthTokenService');
+
+    // 3. Verify lazy line refresh when 1 file is edited (no full sync required)
+    fs.writeFileSync(
+      path.join(dir, 'src', 'auth', 'token-service.ts'),
+      [
+        '// Added header comment line 1',
+        '// Added header comment line 2',
+        'export const DEFAULT_CLOCK_TOLERANCE_SEC = 60;',
+        'export const appendImmutableEntry = async (id: string): Promise<boolean> => Boolean(id);',
+        'export class AuthTokenService {',
+        '  revokeSessionSync(sessionId: string): boolean {',
+        '    return sessionId.length > 0;',
+        '  }',
+        '}',
+      ].join('\n'),
+      'utf8',
+    );
+    assert.equal(whereIs(dir, 'revokeSessionSync')[0]?.line, 6);
+
+    // 4. Verify keyword-only search (`hybrid: false`) filters out expired memories (0% leak)
+    agentRemember(dir, {
+      title: 'Expired holiday rate limit freeze',
+      type: 'decision',
+      tags: ['ratelimit'],
+      expiresAt: '2020-01-01',
+      text: 'Temporary expired rate limit rule that must never be returned by keyword search.',
+    });
+    const kwHits = context(dir, 'holiday rate limit freeze', { hybrid: false });
+    assert.equal(kwHits.length, 0, 'Expired memories must be excluded from keyword-only search');
+  });
+});
+
+
 
 

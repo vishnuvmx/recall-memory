@@ -33,20 +33,20 @@
 - **[decision] Non-volatile Passport and multi-model chat sync**: PASSPORT.md stores hash-fingerprinted non-volatile identity, commands, module exports, and active rules (without line numbers or timestam... _(mem_002)_
 
 ## 4. Core Modules & Exported Surface
-- `src/core/agent.ts`: `AgentState`, `agentFilePath`, `agentState`, `syncClaudeBridge`, `syncAllAgentIntegrations`
-- `src/core/background-queue.ts`: `ConsistencyPolicy`, `BackgroundJob`, `BackgroundQueue`
+- `src/cli/index.ts`: `cwd`, `collect`, `parseType`, `parseLimit`, `print`
+- `src/core/agent.ts`: `AgentState`, `agentFilePath`, `agentState`, `syncClaudeBridge`, `HOOK_NAME`
+- `src/core/background-queue.ts`: `ConsistencyPolicy`, `BackgroundJob`, `BackgroundQueue`, `globalBackgroundQueue`
 - `src/core/chat-sync.ts`: `ParsedChatTurn`, `ExtractedInsight`, `SyncWorkspaceOptions`, `SyncWorkspaceReport`, `parseTranscriptTail`
 - `src/core/checkpoint.ts`: `CheckpointOptions`, `CheckpointResult`, `SessionLogEntry`, `getCurrentTimestamp`, `parseSessionLogEntries`
 - `src/core/config.ts`: `configPath`, `defaultConfig`, `loadConfig`, `writeConfig`
 - `src/core/conflict.ts`: `ConflictCheckResult`, `isMemoryExpired`, `supersedeMemory`, `deprecateMemory`, `detectConflicts`
-- `src/core/cost.ts`: `CostLine`, `CostReport`, `costReport`
+- `src/core/cost.ts`: `estimateTokens`, `CostLine`, `CostReport`, `costReport`
 - `src/core/doctor.ts`: `Check`, `runDoctor`
-- `src/core/embeddings.ts`: `EmbeddingResult`, `hashContent`, `cosineSimilarity`, `generateLocalDenseVector`, `getOrGenerateEmbedding`
-- `src/core/git.ts`: `GitInfo`, `gitInfo`, `recallChanges`, `repoChanges`, `Commit`
+- `src/core/embeddings.ts`: `CURRENT_EMBEDDING_MODEL`, `CURRENT_EMBEDDING_VERSION`, `EMBEDDING_DIMENSIONS`, `EmbeddingResult`, `hashContent`
+- `src/core/git.ts`: `GitInfo`, `hasGitDir`, `gitInfo`, `gitHeadSha`, `recallChanges`
 - `src/core/hybrid-retrieval.ts`: `FusionMode`, `HybridSearchOptions`, `HybridSearchHit`, `extractTechnicalIdentifiers`, `expandQueryFromCorpus`
 - `src/core/index-builder.ts`: `buildIndexBlock`, `indexPath`, `renderIndex`, `rebuildIndex`, `IndexState`
 - `src/core/init.ts`: `InitReport`, `initProject`
-- `src/core/landmarks.ts`: `Landmark`, `FileLandmarks`, `extractLandmarks`, `scanLandmarks`, `formatLandmarksMarkdown`
-- `src/core/mapper.ts`: `DirectoryInfo`, `ProjectMapData`, `createGitignoreFilter`, `parseGitignore`, `ScanProjectOptions`
-- _... (21 more modules — query `recall where <name>`)_
+- `src/core/landmarks.ts`: `Landmark`, `FileLandmarks`, `extractLandmarks`, `CacheRecord`, `OtherFileRecord`
+- _... (24 more modules — query `recall where <name>`)_
 <!-- recall:passport:end -->

@@ -4,8 +4,20 @@ import { loadConfig } from './config.js';
 import { gitInfo, recallChanges, recallHistory, undoRecall, type Commit, type UndoResult } from './git.js';
 import { indexState, rebuildIndex, type IndexState } from './index-builder.js';
 import { generateProjectMap } from './mapper.js';
-import { appendChangelog, createMemory, findMemory, loadAll, loadSearchableMemories, rewriteMemory, updateMemory, type Memory, type NewMemory } from './memory.js';
-import { syncPassport, type PassportSyncResult } from './passport.js';
+import {
+  appendChangelog,
+  computeRecallFilesStatKey,
+  createMemory,
+  findMemory,
+  loadAll,
+  loadSearchableMemories,
+  rewriteMemory,
+  updateMemory,
+  type LoadResult,
+  type Memory,
+  type NewMemory,
+} from './memory.js';
+import { loadFingerprint, saveFingerprint, syncPassport, type PassportSyncResult } from './passport.js';
 import { requireInitialized, type Project } from './project.js';
 import { search, stem, tokenize, type SearchHit, type SearchOptions } from './retrieval.js';
 import { hybridSearch, type FusionMode, type HybridSearchHit } from './hybrid-retrieval.js';
@@ -26,21 +38,27 @@ export interface ContextOptions extends SearchOptions {
   fusionMode?: FusionMode;
 }
 
-function refreshDerivedStores(p: Project, changedMemories?: Memory[]): void {
-  const loaded = rebuildIndex(p.recallDir);
+function refreshDerivedStores(p: Project, changedMemories?: Memory[], preloaded?: LoadResult): void {
+  const loaded = rebuildIndex(p.recallDir, preloaded);
   const searchable = loadSearchableMemories(p.recallDir, loaded);
+  const filesStatKey = computeRecallFilesStatKey(p.recallDir);
   try {
     const store = getSharedSqliteStore(p.recallDir);
     if (changedMemories && changedMemories.length > 0) {
-      store.syncChangedMemories(changedMemories, searchable);
+      store.syncChangedMemories(changedMemories, searchable, filesStatKey);
     } else {
-      store.ensureSynced(searchable);
+      store.ensureSynced(searchable, filesStatKey);
     }
   } catch {
     /* fallback cleanly when node:sqlite unavailable */
   }
   try {
-    syncPassport(p.root, p.recallDir, { memories: searchable });
+    // Use cached landmarks on memory-only writes so saving a memory never walks the repository tree
+    syncPassport(p.root, p.recallDir, { memories: searchable, useCachedLandmarks: true });
+    const fp = loadFingerprint(p.recallDir);
+    if (fp.memoriesStatKey !== filesStatKey) {
+      saveFingerprint(p.recallDir, { ...fp, memoriesStatKey: filesStatKey });
+    }
   } catch {
     /* non-fatal */
   }
@@ -140,7 +158,8 @@ export function agentRemember(start: string, input: NewMemory): RememberResult {
   }
   const status = input.status ?? (mode === 'review' || process.env.RECALL_AGENT === '1' ? 'proposed' : 'active');
   const type = input.type ?? 'fact';
-  const allMemories = loadAll(p.recallDir).memories;
+  const loadedAll = loadAll(p.recallDir);
+  const allMemories = loadedAll.memories;
 
   // In review mode never silently rewrite an approved memory; only merge into other proposals.
   const candidates = allMemories.filter(
@@ -170,8 +189,14 @@ export function agentRemember(start: string, input: NewMemory): RememberResult {
     ? rewriteMemory(p.recallDir, dup.id, { ...input, type, status })
     : createMemory(p.recallDir, { ...input, type, status }, allMemories);
 
+  // Update the already-loaded list in memory so refreshDerivedStores avoids re-reading every .md file
+  const nextMemories = dup
+    ? allMemories.map((m) => (m.id === memory.id ? memory : m))
+    : [...allMemories, memory].sort((a, b) => a.id.localeCompare(b.id));
+  const nextLoaded: LoadResult = { ...loadedAll, memories: nextMemories };
+
   appendChangelog(p.recallDir, dup ? 'update' : 'remember', memory);
-  refreshDerivedStores(p, [memory]);
+  refreshDerivedStores(p, [memory], nextLoaded);
   return {
     memory,
     action: dup ? 'updated' : 'created',
@@ -202,13 +227,25 @@ export function archive(start: string, id: string): Memory {
 
 export function contextHybrid(start: string, query: string, opts: ContextOptions = {}): HybridSearchHit[] {
   const p = requireInitialized(start);
-  const all = loadSearchableMemories(p.recallDir);
+  const filesStatKey = computeRecallFilesStatKey(p.recallDir);
   let store;
+  let all: Memory[] | null = null;
+
   try {
     store = getSharedSqliteStore(p.recallDir);
-    store.ensureSynced(all);
+    // Fast-path: if no .recall/ Markdown files changed on disk, read parsed memories directly from SQLite (0 MD reads!)
+    if (store.getMeta('files_stat_key') === filesStatKey && store.getMeta('sync_hash')) {
+      all = store.getAllMemories();
+    } else {
+      all = loadSearchableMemories(p.recallDir);
+      store.ensureSynced(all, filesStatKey);
+    }
   } catch {
-    /* fallback cleanly when node:sqlite unavailable */
+    store = undefined;
+  }
+
+  if (!all) {
+    all = loadSearchableMemories(p.recallDir);
   }
 
   return hybridSearch(all, query, {
