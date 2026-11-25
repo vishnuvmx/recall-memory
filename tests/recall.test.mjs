@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -815,7 +816,14 @@ test('Stage 3 Verification (Check B): Cache correctness across uncommitted edits
     assert.equal(whereIs(dir, 'alphaOrigin')[0]?.file, 'src/core/alpha.ts');
     assert.ok(context(dir, 'Cache durability anchor memory').length > 0);
     assert.equal(fs.existsSync(path.join(dir, '.recall', '.cache', 'landmarks-cache.json')), true);
-    assert.equal(fs.existsSync(path.join(dir, '.recall', '.cache', 'recall.db')), true);
+    let hasNodeSqlite = false;
+    try {
+      createRequire(import.meta.url)('node:sqlite');
+      hasNodeSqlite = true;
+    } catch {
+      hasNodeSqlite = false;
+    }
+    assert.equal(fs.existsSync(path.join(dir, '.recall', '.cache', 'recall.db')), hasNodeSqlite);
 
     // 7. File whose timestamp (`mtimeMs`) is preserved via `utimesSync` while contents change (IDENTICAL byte size!)
     const preservedPath = path.join(dir, 'src', 'core', 'alpha.ts');
